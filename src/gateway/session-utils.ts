@@ -1501,8 +1501,28 @@ export function listSessionsFromStore(params: {
     sessions = sessions.filter((s) => (s.updatedAt ?? 0) >= cutoff);
   }
 
-  if (typeof opts.limit === "number" && Number.isFinite(opts.limit)) {
-    const limit = Math.max(1, Math.floor(opts.limit));
+  // Apply before_id cursor: skip entries until the pivot key is found, then
+  // take the next page. Ported from claude-code HISTORY_PAGE_SIZE + before_id pattern.
+  const beforeId = typeof opts.beforeId === "string" ? opts.beforeId.trim() : "";
+  if (beforeId) {
+    const pivotIndex = sessions.findIndex((s) => s.key === beforeId);
+    if (pivotIndex >= 0) {
+      sessions = sessions.slice(pivotIndex + 1);
+    }
+  }
+
+  const limit =
+    typeof opts.limit === "number" && Number.isFinite(opts.limit)
+      ? Math.max(1, Math.floor(opts.limit))
+      : undefined;
+
+  let nextCursor: string | undefined;
+  if (limit !== undefined) {
+    // Peek one extra entry to determine whether there is a next page.
+    const sliced = sessions.slice(0, limit + 1);
+    if (sliced.length > limit) {
+      nextCursor = sliced[limit - 1]?.key;
+    }
     sessions = sessions.slice(0, limit);
   }
 
@@ -1512,5 +1532,6 @@ export function listSessionsFromStore(params: {
     count: sessions.length,
     defaults: getSessionDefaults(cfg),
     sessions,
+    nextCursor,
   };
 }

@@ -25,6 +25,11 @@ export type SessionsListResultBase<TDefaults, TRow> = {
   count: number;
   defaults: TDefaults;
   sessions: TRow[];
+  /**
+   * Cursor for the next page. Pass as `beforeId` in the next `sessions.list` call.
+   * Undefined when no more pages exist. Ported from claude-code before_id paging pattern.
+   */
+  nextCursor?: string;
 };
 
 export type SessionsPatchResultBase<TEntry> = {

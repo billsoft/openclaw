@@ -55,6 +55,12 @@ export const SessionsListParamsSchema = Type.Object(
     spawnedBy: Type.Optional(NonEmptyString),
     agentId: Type.Optional(NonEmptyString),
     search: Type.Optional(Type.String()),
+    /**
+     * Cursor for forward-paging. Pass the `nextCursor` value from a previous
+     * response to retrieve the next page of results (most-recent first).
+     * Ported from claude-code HISTORY_PAGE_SIZE + before_id pattern.
+     */
+    beforeId: Type.Optional(Type.String()),
   },
   { additionalProperties: false },
 );

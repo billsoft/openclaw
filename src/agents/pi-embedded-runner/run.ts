@@ -63,6 +63,10 @@ import {
   pickFallbackThinkingLevel,
 } from "../pi-embedded-helpers.js";
 import { ensureRuntimePluginsLoaded } from "../runtime-plugins.js";
+import {
+  calculateTokenWarningState,
+  getAutoCompactThreshold,
+} from "../compact-autocompact-thresholds.js";
 import { derivePromptTokens, normalizeUsage, type UsageLike } from "../usage.js";
 import { redactRunIdentifier, resolveRunWorkspaceDir } from "../workspace-run.js";
 import { runPostCompactionSideEffects } from "./compact.js";
@@ -569,6 +573,106 @@ export async function runEmbeddedPiAgent(
             });
           }
           runLoopIterations += 1;
+          // ── Proactive compaction ────────────────────────────────────────────
+          // Ported from claude-code's proactive auto-compact pattern.
+          // Before every retry turn (not the first), check if the previous turn's
+          // prompt token count crossed the auto-compact threshold. If so, compact
+          // now — before submitting the next prompt — to avoid the reactive
+          // overflow path where context already exceeded the model limit.
+          //
+          // Conditions:
+          //  - runLoopIterations > 1: we have at least one prior turn's usage
+          //  - lastRunPromptUsage: valid usage snapshot from the previous call
+          //  - contextEngine.info.ownsCompaction !== true: engine does not self-compact
+          //  - not already aborted
+          if (
+            runLoopIterations > 1 &&
+            lastRunPromptUsage &&
+            contextEngine.info.ownsCompaction !== true &&
+            !params.abortSignal?.aborted
+          ) {
+            const proactivePromptTokens = derivePromptTokens(lastRunPromptUsage);
+            if (proactivePromptTokens !== undefined) {
+              const { shouldAutoCompact: proactiveShouldCompact } = calculateTokenWarningState(
+                proactivePromptTokens,
+                ctxInfo.tokens,
+              );
+              if (proactiveShouldCompact) {
+                log.info(
+                  `[proactive-compact] prompt=${proactivePromptTokens} threshold=${getAutoCompactThreshold(ctxInfo.tokens)} ` +
+                    `contextWindow=${ctxInfo.tokens} for ${provider}/${modelId}; compacting before next turn`,
+                );
+                let proactiveCompactResult: Awaited<ReturnType<typeof contextEngine.compact>>;
+                const proactiveCompactionCtx = {
+                  ...buildEmbeddedCompactionRuntimeContext({
+                    sessionKey: params.sessionKey,
+                    messageChannel: params.messageChannel,
+                    messageProvider: params.messageProvider,
+                    agentAccountId: params.agentAccountId,
+                    currentChannelId: params.currentChannelId,
+                    currentThreadTs: params.currentThreadTs,
+                    currentMessageId: params.currentMessageId,
+                    authProfileId: lastProfileId,
+                    workspaceDir: resolvedWorkspace,
+                    agentDir,
+                    config: params.config,
+                    skillsSnapshot: params.skillsSnapshot,
+                    senderIsOwner: params.senderIsOwner,
+                    senderId: params.senderId,
+                  }),
+                  trigger: "proactive",
+                  currentTokenCount: proactivePromptTokens,
+                };
+                try {
+                  proactiveCompactResult = await contextEngine.compact({
+                    sessionId: params.sessionId,
+                    sessionKey: params.sessionKey,
+                    sessionFile: params.sessionFile,
+                    tokenBudget: ctxInfo.tokens,
+                    currentTokenCount: proactivePromptTokens,
+                    force: false,
+                    compactionTarget: "budget",
+                    runtimeContext: proactiveCompactionCtx,
+                  });
+                  if (proactiveCompactResult.ok && proactiveCompactResult.compacted) {
+                    await runContextEngineMaintenance({
+                      contextEngine,
+                      sessionId: params.sessionId,
+                      sessionKey: params.sessionKey,
+                      sessionFile: params.sessionFile,
+                      reason: "compaction",
+                      runtimeContext: proactiveCompactionCtx,
+                    });
+                  }
+                } catch (compactErr) {
+                  log.warn(
+                    `[proactive-compact] contextEngine.compact() threw for ${provider}/${modelId}: ${String(compactErr)}`,
+                  );
+                  proactiveCompactResult = {
+                    ok: false,
+                    compacted: false,
+                    reason: String(compactErr),
+                  };
+                }
+                if (proactiveCompactResult.compacted) {
+                  autoCompactionCount += 1;
+                  await runPostCompactionSideEffects({
+                    config: params.config,
+                    sessionKey: params.sessionKey,
+                    sessionFile: params.sessionFile,
+                  });
+                  log.info(
+                    `[proactive-compact] compaction succeeded for ${provider}/${modelId}; proceeding with next turn`,
+                  );
+                } else {
+                  log.debug(
+                    `[proactive-compact] no compaction needed/possible for ${provider}/${modelId}: ${proactiveCompactResult.reason ?? "nothing to compact"}`,
+                  );
+                }
+              }
+            }
+          }
+          // ── End proactive compaction ─────────────────────────────────────────
           const runtimeAuthRetry = authRetryPending;
           authRetryPending = false;
           attemptedThinking.add(thinkLevel);
