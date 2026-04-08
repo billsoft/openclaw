@@ -464,6 +464,7 @@ export async function acquireSessionWriteLock(params: {
   staleMs?: number;
   maxHoldMs?: number;
   allowReentrant?: boolean;
+  autoCleanup?: boolean;
 }): Promise<{
   release: () => Promise<void>;
 }> {
@@ -471,6 +472,7 @@ export async function acquireSessionWriteLock(params: {
   const timeoutMs = resolvePositiveMs(params.timeoutMs, 10_000, { allowInfinity: true });
   const staleMs = resolvePositiveMs(params.staleMs, DEFAULT_STALE_MS);
   const maxHoldMs = resolvePositiveMs(params.maxHoldMs, DEFAULT_MAX_HOLD_MS);
+  const autoCleanup = params.autoCleanup ?? true;
   const sessionFile = path.resolve(params.sessionFile);
   const sessionDir = path.dirname(sessionFile);
   await fs.mkdir(sessionDir, { recursive: true });
@@ -482,6 +484,20 @@ export async function acquireSessionWriteLock(params: {
   }
   const normalizedSessionFile = path.join(normalizedDir, path.basename(sessionFile));
   const lockPath = `${normalizedSessionFile}.lock`;
+
+  // Auto-cleanup: automatically clean stale locks in the same directory before attempting to acquire
+  // This prevents getting stuck on old/stale lock files from crashed processes
+  if (autoCleanup) {
+    try {
+      await cleanStaleLockFiles({
+        sessionsDir: normalizedDir,
+        staleMs,
+        removeStale: true,
+      });
+    } catch {
+      // Best effort - don't fail the lock acquisition if cleanup fails
+    }
+  }
 
   const allowReentrant = params.allowReentrant ?? true;
   const held = HELD_LOCKS.get(normalizedSessionFile);
