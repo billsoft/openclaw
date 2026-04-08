@@ -1,9 +1,16 @@
 import type { MemoryPromptSectionBuilder } from "openclaw/plugin-sdk/memory-core-host-runtime-core";
+import { readMemoryEntrypoint, MEMORY_ENTRYPOINT_NAME } from "./memory-entrypoint.js";
+import { buildTypedMemoryGuidanceLines } from "./prompt-sections-typed.js";
 
-export const buildPromptSection: MemoryPromptSectionBuilder = ({
-  availableTools,
-  citationsMode,
-}) => {
+/**
+ * Build the memory recall tool guidance lines (search/get instructions + citations).
+ * This is the original section — kept intact so existing behaviour is unchanged
+ * when no workspaceDir is available.
+ */
+function buildRecallGuidanceLines(
+  availableTools: Set<string>,
+  citationsMode: string | undefined,
+): string[] {
   const hasMemorySearch = availableTools.has("memory_search");
   const hasMemoryGet = availableTools.has("memory_get");
 
@@ -35,4 +42,64 @@ export const buildPromptSection: MemoryPromptSectionBuilder = ({
   }
   lines.push("");
   return lines;
+}
+
+/**
+ * Original export — preserved unchanged for backward compatibility.
+ * Used when no workspaceDir is available (e.g. legacy path, tests).
+ */
+export const buildPromptSection: MemoryPromptSectionBuilder = ({
+  availableTools,
+  citationsMode,
+}) => {
+  return buildRecallGuidanceLines(availableTools, citationsMode);
 };
+
+/**
+ * Enhanced prompt builder factory that includes:
+ *   1. Typed memory guidance (4 types: user/feedback/project/reference)
+ *   2. MEMORY.md index content (truncated to line + byte caps)
+ *   3. Memory recall tool instructions
+ *
+ * Created via createTypedMemoryPromptBuilder(workspaceDir, memoryDir) in
+ * index.ts and passed as the registerMemoryCapability promptBuilder when
+ * both paths are known at plugin registration time.
+ *
+ * This is additive: if workspaceDir is not provided, falls back to the
+ * original buildPromptSection behaviour (no typed guidance, no index).
+ */
+export function createTypedMemoryPromptBuilder(
+  workspaceDir: string,
+  memoryDir: string,
+): MemoryPromptSectionBuilder {
+  return ({ availableTools, citationsMode }) => {
+    const lines: string[] = [];
+
+    // Section 1: typed memory guidance (types, what not to save, how to save,
+    // when to access, before recommending). These go BEFORE the tool guidance
+    // so they are in the stable-prefix zone of the prompt cache.
+    lines.push(...buildTypedMemoryGuidanceLines(memoryDir));
+    lines.push("");
+
+    // Section 2: MEMORY.md index content. Read synchronously (matches claude-code
+    // pattern; prompt building is synchronous in openclaw too).
+    const entrypoint = readMemoryEntrypoint(workspaceDir);
+    lines.push(`## ${MEMORY_ENTRYPOINT_NAME}`);
+    lines.push("");
+    if (entrypoint.isEmpty) {
+      lines.push(
+        `Your ${MEMORY_ENTRYPOINT_NAME} is currently empty. When you save new memories, they will appear here.`,
+      );
+    } else {
+      lines.push(entrypoint.content);
+    }
+    lines.push("");
+
+    // Section 3: recall tool guidance (dynamic: depends on which tools are
+    // available at runtime). Placed AFTER static content so tool-list changes
+    // don't invalidate the stable cached prefix.
+    lines.push(...buildRecallGuidanceLines(availableTools, citationsMode));
+
+    return lines;
+  };
+}

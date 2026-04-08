@@ -1,3 +1,8 @@
+import path from "node:path";
+import {
+  resolveAgentWorkspaceDir,
+  resolveDefaultAgentId,
+} from "openclaw/plugin-sdk/memory-core-host-engine-foundation";
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 import { registerMemoryCli } from "./src/cli.js";
 import { registerDreamingCommand } from "./src/dreaming-command.js";
@@ -9,7 +14,7 @@ import {
   DEFAULT_MEMORY_FLUSH_SOFT_TOKENS,
 } from "./src/flush-plan.js";
 import { registerBuiltInMemoryEmbeddingProviders } from "./src/memory/provider-adapters.js";
-import { buildPromptSection } from "./src/prompt-section.js";
+import { buildPromptSection, createTypedMemoryPromptBuilder } from "./src/prompt-section.js";
 import { listMemoryCorePublicArtifacts } from "./src/public-artifacts.js";
 import { memoryRuntime } from "./src/runtime-provider.js";
 import { createMemoryGetTool, createMemorySearchTool } from "./src/tools.js";
@@ -30,8 +35,20 @@ export default definePluginEntry({
     registerBuiltInMemoryEmbeddingProviders(api);
     registerShortTermPromotionDreaming(api);
     registerDreamingCommand(api);
+    // Resolve the primary agent's workspace directory so the promptBuilder can
+    // read MEMORY.md and provide typed memory guidance. Falls back to the
+    // original buildPromptSection when no workspace can be resolved (e.g.
+    // during tests or when agentDir is not configured).
+    const agentId = resolveDefaultAgentId(api.config);
+    const workspaceDir = resolveAgentWorkspaceDir(api.config, agentId)?.trim();
+    const memoryDir = workspaceDir ? path.join(workspaceDir, "memory") : undefined;
+    const promptBuilder =
+      workspaceDir && memoryDir
+        ? createTypedMemoryPromptBuilder(workspaceDir, memoryDir)
+        : buildPromptSection;
+
     api.registerMemoryCapability({
-      promptBuilder: buildPromptSection,
+      promptBuilder,
       flushPlanResolver: buildMemoryFlushPlan,
       runtime: memoryRuntime,
       publicArtifacts: {
