@@ -13,7 +13,7 @@ export function buildOutboundBaseSessionKey(params: {
     channel: params.channel,
     accountId: params.accountId,
     peer: params.peer,
-    dmScope: params.cfg.session?.dmScope ?? "main",
+    dmScope: params.cfg.session?.dmScope ?? "per-channel-peer",
     identityLinks: params.cfg.session?.identityLinks,
   });
 }
