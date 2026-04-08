@@ -280,7 +280,11 @@ async function selectRelevantMemoriesViaLLM(params: {
  * @param cfg            - OpenClaw config (for model resolution).
  * @param agentId        - Agent identifier (for model/auth resolution).
  * @param signal         - AbortSignal for cancellation.
- * @param recentTools    - Tools recently used in this session (for exclusion).
+ * @param recentTools      - Tools recently used in this session (for exclusion).
+ * @param alreadySurfaced  - Paths already shown in prior searches this session.
+ *                           Pre-filtered before the LLM call so the 5-slot budget
+ *                           is spent on fresh candidates only.
+ *                           Ported from claude-code findRelevantMemories alreadySurfaced filter.
  */
 export async function rankMemoriesByRelevance(params: {
   query: string;
@@ -290,13 +294,19 @@ export async function rankMemoriesByRelevance(params: {
   agentId: string;
   signal: AbortSignal;
   recentTools?: readonly string[];
+  alreadySurfaced?: ReadonlySet<string>;
 }): Promise<RankedMemory[]> {
   if (params.candidatePaths.length === 0) {
     return [];
   }
 
   // Only scan the subset that are candidates (no need to scan all files).
-  const candidateSet = new Set(params.candidatePaths);
+  // Pre-filter alreadySurfaced before the LLM call so the selector's 5-slot
+  // budget is spent on fresh candidates only (ported from claude-code findRelevantMemories).
+  const alreadySurfaced = params.alreadySurfaced ?? new Set<string>();
+  const candidateSet = new Set(
+    params.candidatePaths.filter((p) => !alreadySurfaced.has(p)),
+  );
   const headers = await scanMemoryHeaders(params.memoryDir, params.signal);
   const candidateHeaders = headers.filter((h) => candidateSet.has(h.filePath));
 
