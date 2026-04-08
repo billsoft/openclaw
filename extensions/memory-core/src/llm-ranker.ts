@@ -57,37 +57,55 @@ export type RankedMemory = {
   description: string | null;
 };
 
+/** Valid memory type labels from the 4-type taxonomy. */
+type MemoryType = "user" | "feedback" | "project" | "reference";
+
+function parseMemoryType(raw: string | undefined): MemoryType | undefined {
+  if (raw === "user" || raw === "feedback" || raw === "project" || raw === "reference") {
+    return raw;
+  }
+  return undefined;
+}
+
 type MemoryHeader = {
   filename: string; // relative path within memoryDir
   filePath: string; // absolute path
   mtimeMs: number;
   description: string | null;
+  type: MemoryType | undefined;
 };
 
 // ── Frontmatter scanning ─────────────────────────────────────────────────────
 
-function parseFrontmatterDescription(content: string): string | null {
+function parseFrontmatter(content: string): { description: string | null; type: MemoryType | undefined } {
   if (!content.startsWith("---")) {
-    return null;
+    return { description: null, type: undefined };
   }
   const end = content.indexOf("\n---", 3);
   if (end === -1) {
-    return null;
+    return { description: null, type: undefined };
   }
   const block = content.slice(3, end);
+  let description: string | null = null;
+  let type: MemoryType | undefined;
   for (const line of block.split("\n")) {
-    const m = /^description\s*:\s*(.+)$/.exec(line.trim());
-    if (m) {
-      return m[1]!.trim().replace(/^["']|["']$/g, "");
+    const trimmed = line.trim();
+    const descMatch = /^description\s*:\s*(.+)$/.exec(trimmed);
+    if (descMatch) {
+      description = descMatch[1]!.trim().replace(/^["']|["']$/g, "");
+    }
+    const typeMatch = /^type\s*:\s*(.+)$/.exec(trimmed);
+    if (typeMatch) {
+      type = parseMemoryType(typeMatch[1]!.trim().replace(/^["']|["']$/g, ""));
     }
   }
-  return null;
+  return { description, type };
 }
 
 async function readFrontmatterHeader(
   filePath: string,
   signal: AbortSignal,
-): Promise<Pick<MemoryHeader, "mtimeMs" | "description"> | null> {
+): Promise<Pick<MemoryHeader, "mtimeMs" | "description" | "type"> | null> {
   try {
     const [stat, content] = await Promise.all([
       fs.stat(filePath),
@@ -98,10 +116,8 @@ async function readFrontmatterHeader(
           .join("\n"),
       ),
     ]);
-    return {
-      mtimeMs: stat.mtimeMs,
-      description: parseFrontmatterDescription(content),
-    };
+    const { description, type } = parseFrontmatter(content);
+    return { mtimeMs: stat.mtimeMs, description, type };
   } catch {
     return null;
   }
@@ -135,6 +151,7 @@ async function scanMemoryHeaders(
         filePath,
         mtimeMs: header?.mtimeMs ?? 0,
         description: header?.description ?? null,
+        type: header?.type,
       };
     }),
   );
@@ -151,10 +168,11 @@ async function scanMemoryHeaders(
 function formatManifest(memories: MemoryHeader[]): string {
   return memories
     .map((m) => {
+      const tag = m.type ? `[${m.type}] ` : "";
       const ts = new Date(m.mtimeMs).toISOString();
       return m.description
-        ? `- ${m.filename} (${ts}): ${m.description}`
-        : `- ${m.filename} (${ts})`;
+        ? `- ${tag}${m.filename} (${ts}): ${m.description}`
+        : `- ${tag}${m.filename} (${ts})`;
     })
     .join("\n");
 }

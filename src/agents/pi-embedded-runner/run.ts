@@ -398,6 +398,11 @@ export async function runEmbeddedPiAgent(
       const usageAccumulator = createUsageAccumulator();
       let lastRunPromptUsage: ReturnType<typeof normalizeUsage> | undefined;
       let autoCompactionCount = 0;
+      // Circuit breaker: stop proactive compaction after this many consecutive
+      // failures (same pattern as claude-code MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES).
+      // Prevents wasting API calls when context is irrecoverably over budget.
+      let proactiveCompactConsecutiveFailures = 0;
+      const MAX_PROACTIVE_COMPACT_CONSECUTIVE_FAILURES = 3;
       let runLoopIterations = 0;
       let overloadProfileRotations = 0;
       let planningOnlyRetryAttempts = 0;
@@ -589,7 +594,8 @@ export async function runEmbeddedPiAgent(
             runLoopIterations > 1 &&
             lastRunPromptUsage &&
             contextEngine.info.ownsCompaction !== true &&
-            !params.abortSignal?.aborted
+            !params.abortSignal?.aborted &&
+            proactiveCompactConsecutiveFailures < MAX_PROACTIVE_COMPACT_CONSECUTIVE_FAILURES
           ) {
             const proactivePromptTokens = derivePromptTokens(lastRunPromptUsage);
             if (proactivePromptTokens !== undefined) {
@@ -656,6 +662,7 @@ export async function runEmbeddedPiAgent(
                 }
                 if (proactiveCompactResult.compacted) {
                   autoCompactionCount += 1;
+                  proactiveCompactConsecutiveFailures = 0;
                   await runPostCompactionSideEffects({
                     config: params.config,
                     sessionKey: params.sessionKey,
@@ -665,6 +672,14 @@ export async function runEmbeddedPiAgent(
                     `[proactive-compact] compaction succeeded for ${provider}/${modelId}; proceeding with next turn`,
                   );
                 } else {
+                  proactiveCompactConsecutiveFailures += 1;
+                  if (
+                    proactiveCompactConsecutiveFailures >= MAX_PROACTIVE_COMPACT_CONSECUTIVE_FAILURES
+                  ) {
+                    log.warn(
+                      `[proactive-compact] circuit breaker tripped after ${proactiveCompactConsecutiveFailures} consecutive failures — skipping future proactive compaction this session`,
+                    );
+                  }
                   log.debug(
                     `[proactive-compact] no compaction needed/possible for ${provider}/${modelId}: ${proactiveCompactResult.reason ?? "nothing to compact"}`,
                   );
