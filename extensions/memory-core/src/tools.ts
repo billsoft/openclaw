@@ -1,3 +1,4 @@
+import path from "node:path";
 import { formatErrorMessage } from "openclaw/plugin-sdk/error-runtime";
 import {
   jsonResult,
@@ -11,6 +12,7 @@ import {
   resolveMemoryCorePluginConfig,
   resolveMemoryDeepDreamingConfig,
 } from "openclaw/plugin-sdk/memory-core-host-status";
+import { rankMemoriesByRelevance } from "./llm-ranker.js";
 import { recordShortTermRecalls } from "./short-term-promotion.js";
 import {
   clampResultsByInjectedChars,
@@ -250,6 +252,43 @@ export function createMemorySearchTool(options: {
               ...result,
               corpus: "memory" as const,
             }));
+            // LLM ranker: re-rank vector results by semantic relevance (optional, best-effort).
+            // Ported from claude-code memdir/findRelevantMemories.ts selectRelevantMemories().
+            // Only runs when workspaceDir is known and there are multiple candidates to rank.
+            const pluginCfg = resolveMemoryCorePluginConfig(cfg);
+            const llmRankerEnabled =
+              (pluginCfg as Record<string, unknown> | undefined)?.["recall"] !== undefined
+                ? (
+                    (pluginCfg as Record<string, unknown>)["recall"] as
+                      | Record<string, unknown>
+                      | undefined
+                  )?.["llmRanker"] !== false
+                : true; // default enabled
+            if (llmRankerEnabled && surfacedMemoryResults.length > 1 && status.workspaceDir) {
+              const rankerAbort = new AbortController();
+              const rankerTimer = setTimeout(() => rankerAbort.abort(), 10_000);
+              try {
+                const ranked = await rankMemoriesByRelevance({
+                  query,
+                  candidatePaths: surfacedMemoryResults.map((r) => r.path),
+                  memoryDir: path.join(status.workspaceDir, "memory"),
+                  cfg,
+                  agentId,
+                  signal: rankerAbort.signal,
+                });
+                if (ranked.length > 0) {
+                  const rankedPaths = new Set(ranked.map((r) => r.path));
+                  const order = new Map(ranked.map((r, i) => [r.path, i]));
+                  surfacedMemoryResults = surfacedMemoryResults
+                    .filter((r) => rankedPaths.has(r.path))
+                    .sort((a, b) => (order.get(a.path) ?? 999) - (order.get(b.path) ?? 999));
+                }
+              } catch {
+                // Ranker is best-effort; failures must never block memory recall.
+              } finally {
+                clearTimeout(rankerTimer);
+              }
+            }
             const sleepTimezone = resolveMemoryDeepDreamingConfig({
               pluginConfig: resolveMemoryCorePluginConfig(cfg),
               cfg,
