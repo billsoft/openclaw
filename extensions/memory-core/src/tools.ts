@@ -36,6 +36,57 @@ function buildRecallKey(
   return `${result.source}:${result.path}:${result.startLine}:${result.endLine}`;
 }
 
+/**
+ * Per-session deduplication of surfaced memory snippets.
+ *
+ * Ported from claude-code/memdir/findRelevantMemories.ts `alreadySurfaced`
+ * pattern. Prevents the same snippet from dominating repeated memory_search
+ * calls within a single agent session — critical when the agent issues multiple
+ * searches to progressively explore a topic.
+ *
+ * Each session key maps to the set of recall keys already returned. Bounded by
+ * MAX_SURFACED_PER_SESSION entries per session and MAX_TRACKED_SESSIONS
+ * concurrent sessions to prevent unbounded memory growth.
+ */
+const alreadySurfacedBySession = new Map<string, Set<string>>();
+const MAX_SURFACED_PER_SESSION = 500;
+const MAX_TRACKED_SESSIONS = 100;
+
+function getOrCreateSurfacedSet(sessionKey: string): Set<string> {
+  const existing = alreadySurfacedBySession.get(sessionKey);
+  if (existing !== undefined) {
+    return existing;
+  }
+  if (alreadySurfacedBySession.size >= MAX_TRACKED_SESSIONS) {
+    // Evict the oldest session (insertion-order FIFO via Map iteration)
+    const firstKey = alreadySurfacedBySession.keys().next().value;
+    if (firstKey !== undefined) {
+      alreadySurfacedBySession.delete(firstKey);
+    }
+  }
+  const set = new Set<string>();
+  alreadySurfacedBySession.set(sessionKey, set);
+  return set;
+}
+
+function filterAlreadySurfaced<T extends Pick<MemorySearchResult, "source" | "path" | "startLine" | "endLine">>(
+  results: T[],
+  surfaced: Set<string>,
+): T[] {
+  return results.filter((r) => !surfaced.has(buildRecallKey(r)));
+}
+
+function markAsSurfaced(
+  results: Array<Pick<MemorySearchResult, "source" | "path" | "startLine" | "endLine">>,
+  surfaced: Set<string>,
+): void {
+  for (const r of results) {
+    if (surfaced.size < MAX_SURFACED_PER_SESSION) {
+      surfaced.add(buildRecallKey(r));
+    }
+  }
+}
+
 function resolveRecallTrackingResults(
   rawResults: MemorySearchResult[],
   surfacedResults: MemorySearchResult[],
@@ -223,7 +274,15 @@ export function createMemorySearchTool(options: {
                 corpus: requestedCorpus,
               })
             : [];
-          const results = [...surfacedMemoryResults, ...supplementResults]
+          // Deduplicate against snippets already surfaced in this session.
+          // Ported from claude-code findRelevantMemories `alreadySurfaced` pattern:
+          // repeated searches in the same session should progressively explore
+          // new content rather than echo the same top results.
+          const sessionKey = options.agentSessionKey;
+          const surfaced = sessionKey ? getOrCreateSurfacedSet(sessionKey) : null;
+          const combined = [...surfacedMemoryResults, ...supplementResults];
+          const deduped = surfaced ? filterAlreadySurfaced(combined, surfaced) : combined;
+          const results = deduped
             .toSorted((left, right) => {
               if (left.score !== right.score) {
                 return right.score - left.score;
@@ -231,6 +290,9 @@ export function createMemorySearchTool(options: {
               return left.path.localeCompare(right.path);
             })
             .slice(0, Math.max(1, maxResults ?? 10));
+          if (surfaced) {
+            markAsSurfaced(results, surfaced);
+          }
           return jsonResult({
             results,
             provider,
