@@ -255,7 +255,7 @@ export async function executeParallelTasks(
   async function runWithConcurrencyLimit(task: ParallelTaskDecomposition): Promise<void> {
     // Acquire a slot: wait until the oldest slot is free, then claim it.
     const slot = slotIndex++ % maxConcurrency;
-    const acquired = semaphoreSlots[slot]!.then(async () => {
+    const acquired = semaphoreSlots[slot].then(async () => {
       const depMissing = task.dependencies.find((dep) => !completedResults.has(dep));
       if (depMissing) {
         completedResults.set(task.id, {
@@ -267,12 +267,7 @@ export async function executeParallelTasks(
         return;
       }
 
-      const result = await executeSingleTask(
-        config.spawnFn,
-        task,
-        config,
-        abortController.signal,
-      );
+      const result = await executeSingleTask(config.spawnFn, task, config, abortController.signal);
       completedResults.set(task.id, result);
       if (config.failFast && result.status !== "completed") {
         abortController.abort();

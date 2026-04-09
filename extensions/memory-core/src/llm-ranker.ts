@@ -78,7 +78,10 @@ type MemoryHeader = {
 
 // ── Frontmatter scanning ─────────────────────────────────────────────────────
 
-function parseFrontmatter(content: string): { description: string | null; type: MemoryType | undefined } {
+function parseFrontmatter(content: string): {
+  description: string | null;
+  type: MemoryType | undefined;
+} {
   if (!content.startsWith("---")) {
     return { description: null, type: undefined };
   }
@@ -93,11 +96,11 @@ function parseFrontmatter(content: string): { description: string | null; type: 
     const trimmed = line.trim();
     const descMatch = /^description\s*:\s*(.+)$/.exec(trimmed);
     if (descMatch) {
-      description = descMatch[1]!.trim().replace(/^["']|["']$/g, "");
+      description = descMatch[1].trim().replace(/^["']|["']$/g, "");
     }
     const typeMatch = /^type\s*:\s*(.+)$/.exec(trimmed);
     if (typeMatch) {
-      type = parseMemoryType(typeMatch[1]!.trim().replace(/^["']|["']$/g, ""));
+      type = parseMemoryType(typeMatch[1].trim().replace(/^["']|["']$/g, ""));
     }
   }
   return { description, type };
@@ -110,12 +113,9 @@ async function readFrontmatterHeader(
   try {
     const [stat, content] = await Promise.all([
       fs.stat(filePath),
-      fs.readFile(filePath, { encoding: "utf8", signal }).then((text) =>
-        text
-          .split("\n")
-          .slice(0, FRONTMATTER_SCAN_LINES)
-          .join("\n"),
-      ),
+      fs
+        .readFile(filePath, { encoding: "utf8", signal })
+        .then((text) => text.split("\n").slice(0, FRONTMATTER_SCAN_LINES).join("\n")),
     ]);
     const { description, type } = parseFrontmatter(content);
     return { mtimeMs: stat.mtimeMs, description, type };
@@ -128,10 +128,7 @@ async function readFrontmatterHeader(
  * Scan memory directory for .md files (excluding MEMORY.md), read their
  * frontmatter descriptions, sort by recency, cap at MAX_SCAN_FILES.
  */
-async function scanMemoryHeaders(
-  memoryDir: string,
-  signal: AbortSignal,
-): Promise<MemoryHeader[]> {
+async function scanMemoryHeaders(memoryDir: string, signal: AbortSignal): Promise<MemoryHeader[]> {
   let entries: string[];
   try {
     entries = await fs.readdir(memoryDir, { recursive: true, encoding: "utf8" });
@@ -160,7 +157,7 @@ async function scanMemoryHeaders(
   return results
     .filter((r): r is PromiseFulfilledResult<MemoryHeader> => r.status === "fulfilled")
     .map((r) => r.value)
-    .sort((a, b) => b.mtimeMs - a.mtimeMs)
+    .toSorted((a, b) => b.mtimeMs - a.mtimeMs)
     .slice(0, MAX_SCAN_FILES);
 }
 
@@ -233,7 +230,7 @@ async function selectRelevantMemoriesViaLLM(params: {
       auth: prepared.auth,
       context: {
         systemPrompt: SELECT_MEMORIES_SYSTEM_PROMPT,
-        messages: [{ role: "user", content: userContent }],
+        messages: [{ role: "user", content: userContent, timestamp: Date.now() }],
       },
       options: {
         maxTokens: 256,
@@ -255,8 +252,9 @@ async function selectRelevantMemoriesViaLLM(params: {
     ) {
       return [];
     }
-    return ((parsed as { selected_memories: unknown[] })["selected_memories"] as unknown[])
-      .filter((f): f is string => typeof f === "string" && validFilenames.has(f));
+    return (parsed as { selected_memories: unknown[] })["selected_memories"].filter(
+      (f): f is string => typeof f === "string" && validFilenames.has(f),
+    );
   } catch {
     return [];
   } finally {
@@ -306,9 +304,7 @@ export async function rankMemoriesByRelevance(params: {
   // Pre-filter alreadySurfaced before the LLM call so the selector's 5-slot
   // budget is spent on fresh candidates only (ported from claude-code findRelevantMemories).
   const alreadySurfaced = params.alreadySurfaced ?? new Set<string>();
-  const candidateSet = new Set(
-    params.candidatePaths.filter((p) => !alreadySurfaced.has(p)),
-  );
+  const candidateSet = new Set(params.candidatePaths.filter((p) => !alreadySurfaced.has(p)));
   const headers = await scanMemoryHeaders(params.memoryDir, params.signal);
   const candidateHeaders = headers.filter((h) => candidateSet.has(h.filePath));
 

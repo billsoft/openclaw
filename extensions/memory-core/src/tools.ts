@@ -32,10 +32,13 @@ import {
   searchMemoryCorpusSupplements,
 } from "./tools.shared.js";
 
-function buildRecallKey(
-  result: Pick<MemorySearchResult, "source" | "path" | "startLine" | "endLine">,
-): string {
-  return `${result.source}:${result.path}:${result.startLine}:${result.endLine}`;
+function buildRecallKey(result: {
+  source?: string;
+  path: string;
+  startLine?: number;
+  endLine?: number;
+}): string {
+  return `${result.source ?? ""}:${result.path}:${result.startLine ?? 0}:${result.endLine ?? 0}`;
 }
 
 /**
@@ -71,15 +74,14 @@ function getOrCreateSurfacedSet(sessionKey: string): Set<string> {
   return set;
 }
 
-function filterAlreadySurfaced<T extends Pick<MemorySearchResult, "source" | "path" | "startLine" | "endLine">>(
-  results: T[],
-  surfaced: Set<string>,
-): T[] {
+function filterAlreadySurfaced<
+  T extends { source?: string; path: string; startLine?: number; endLine?: number },
+>(results: T[], surfaced: Set<string>): T[] {
   return results.filter((r) => !surfaced.has(buildRecallKey(r)));
 }
 
 function markAsSurfaced(
-  results: Array<Pick<MemorySearchResult, "source" | "path" | "startLine" | "endLine">>,
+  results: Array<{ source?: string; path: string; startLine?: number; endLine?: number }>,
   surfaced: Set<string>,
 ): void {
   for (const r of results) {
@@ -257,12 +259,9 @@ export function createMemorySearchTool(options: {
             // Only runs when workspaceDir is known and there are multiple candidates to rank.
             const pluginCfg = resolveMemoryCorePluginConfig(cfg);
             const llmRankerEnabled =
-              (pluginCfg as Record<string, unknown> | undefined)?.["recall"] !== undefined
-                ? (
-                    (pluginCfg as Record<string, unknown>)["recall"] as
-                      | Record<string, unknown>
-                      | undefined
-                  )?.["llmRanker"] !== false
+              pluginCfg?.["recall"] !== undefined
+                ? (pluginCfg["recall"] as Record<string, unknown> | undefined)?.["llmRanker"] !==
+                  false
                 : true; // default enabled
             if (llmRankerEnabled && surfacedMemoryResults.length > 1 && status.workspaceDir) {
               const rankerAbort = new AbortController();
@@ -281,7 +280,7 @@ export function createMemorySearchTool(options: {
                   const order = new Map(ranked.map((r, i) => [r.path, i]));
                   surfacedMemoryResults = surfacedMemoryResults
                     .filter((r) => rankedPaths.has(r.path))
-                    .sort((a, b) => (order.get(a.path) ?? 999) - (order.get(b.path) ?? 999));
+                    .toSorted((a, b) => (order.get(a.path) ?? 999) - (order.get(b.path) ?? 999));
                 }
               } catch {
                 // Ranker is best-effort; failures must never block memory recall.

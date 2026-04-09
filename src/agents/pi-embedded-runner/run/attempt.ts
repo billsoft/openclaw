@@ -60,11 +60,6 @@ import {
 import { DEFAULT_CONTEXT_TOKENS } from "../../defaults.js";
 import { resolveOpenClawDocsPath } from "../../docs-path.js";
 import { extractMemoriesIfNeeded } from "../../extract-memories.js";
-import {
-  completeWithPreparedSimpleCompletionModel,
-  prepareSimpleCompletionModelForAgent,
-  resolveSidecarModelRef,
-} from "../../simple-completion-runtime.js";
 import { isTimeoutError } from "../../failover-error.js";
 import { resolveHeartbeatPromptForSystemPrompt } from "../../heartbeat-system-prompt.js";
 import { resolveImageSanitizationLimits } from "../../image-sanitization.js";
@@ -104,6 +99,11 @@ import {
   resolveSessionLockMaxHoldFromTimeout,
 } from "../../session-write-lock.js";
 import { detectRuntimeShell } from "../../shell-utils.js";
+import {
+  completeWithPreparedSimpleCompletionModel,
+  prepareSimpleCompletionModelForAgent,
+  resolveSidecarModelRef,
+} from "../../simple-completion-runtime.js";
 import {
   applySkillEnvOverrides,
   applySkillEnvOverridesFromSnapshot,
@@ -2247,11 +2247,12 @@ export async function runEmbeddedAttempt(
         // When agents.defaults.sidecarModelRef is set, sidecar calls route to that
         // model (e.g. minimax/MiniMax-M2.7) instead of the agent's primary model.
         // Fire-and-forget callers suppress errors; this fn throws on model resolution failure.
-        const sidecarModelRef = resolveSidecarModelRef(params.config);
-        const buildSidecarSpawnFn = (agentId: string) =>
-          async (spawnParams: { task: string; label: string }) => {
+        const cfg = params.config!;
+        const sidecarModelRef = resolveSidecarModelRef(cfg);
+        const buildSidecarSpawnFn =
+          (agentId: string) => async (spawnParams: { task: string; label: string }) => {
             const prepared = await prepareSimpleCompletionModelForAgent({
-              cfg: params.config,
+              cfg,
               agentId,
               modelRef: sidecarModelRef,
             });
@@ -2264,7 +2265,7 @@ export async function runEmbeddedAttempt(
               model: prepared.model,
               auth: prepared.auth,
               context: {
-                messages: [{ role: "user", content: spawnParams.task }],
+                messages: [{ role: "user", content: spawnParams.task, timestamp: Date.now() }],
               },
               options: { signal: new AbortController().signal },
             });
@@ -2275,8 +2276,8 @@ export async function runEmbeddedAttempt(
             return {
               messages: [{ role: "assistant", content: text }] as Array<Record<string, unknown>>,
               totalUsage: {
-                input_tokens: response.usage?.input_tokens ?? 0,
-                output_tokens: response.usage?.output_tokens ?? 0,
+                input_tokens: response.usage?.input ?? 0,
+                output_tokens: response.usage?.output ?? 0,
               },
             };
           };

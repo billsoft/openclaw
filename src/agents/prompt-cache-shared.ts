@@ -213,8 +213,7 @@ function createSharedPromptCacheManager(): SharedPromptCacheManager {
           continue;
         }
         const costPerM =
-          COST_PER_1M_INPUT_TOKENS_USD[entry.provider] ??
-          COST_PER_1M_INPUT_TOKENS_USD.anthropic!;
+          COST_PER_1M_INPUT_TOKENS_USD[entry.provider] ?? COST_PER_1M_INPUT_TOKENS_USD.anthropic;
         // Cache reads are billed at 10% of normal input price for Anthropic;
         // use a 0.1 multiplier as a conservative cross-provider approximation.
         const savedPerM = costPerM * 0.9; // savings = full cost minus cache-read cost (~10%)

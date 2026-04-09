@@ -29,9 +29,13 @@ export type EntrypointReadResult = {
 };
 
 function formatFileSize(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024) {
+    return `${bytes} B`;
+  }
   const kb = bytes / 1024;
-  if (kb < 1024) return `${kb.toFixed(1)} KB`;
+  if (kb < 1024) {
+    return `${kb.toFixed(1)} KB`;
+  }
   return `${(kb / 1024).toFixed(1)} MB`;
 }
 
@@ -93,7 +97,6 @@ export function readMemoryEntrypoint(workspaceDir: string): EntrypointReadResult
   const entrypointPath = path.join(workspaceDir, MEMORY_ENTRYPOINT_NAME);
   let raw = "";
   try {
-    // eslint-disable-next-line custom-rules/no-sync-fs
     raw = fs.readFileSync(entrypointPath, { encoding: "utf-8" });
   } catch {
     // No MEMORY.md yet — normal for new agents.

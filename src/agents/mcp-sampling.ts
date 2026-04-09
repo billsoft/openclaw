@@ -12,9 +12,17 @@ const SAMPLING_METHOD = "sampling/createMessage" as const;
 export function hasSamplingCapability(client: Client): boolean {
   // Check server capabilities without making an API call.
   // The MCP SDK exposes getServerCapabilities() for this.
+  // Note: 'sampling' may not be in the official ServerCapabilities type yet
+  // (it's a newer MCP spec extension), so we use a type-safe property check.
   try {
     const caps = client.getServerCapabilities?.();
-    return caps?.sampling !== undefined;
+    if (!caps) {
+      return false;
+    }
+    // Use bracket notation to avoid TS error on non-existent property
+    const hasSampling =
+      "sampling" in caps && (caps as Record<string, unknown>).sampling !== undefined;
+    return hasSampling;
   } catch {
     return false;
   }

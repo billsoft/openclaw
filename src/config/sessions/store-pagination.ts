@@ -51,7 +51,7 @@ export function loadSessionPage(
   // Sort all entries newest-first by updatedAt.
   const sorted: SessionPageEntry[] = Object.entries(store)
     .map(([key, entry]) => ({ key, entry }))
-    .sort((a, b) => {
+    .toSorted((a, b) => {
       const ta = a.entry.updatedAt ?? 0;
       const tb = b.entry.updatedAt ?? 0;
       if (tb !== ta) {
@@ -72,8 +72,7 @@ export function loadSessionPage(
 
   const page = sorted.slice(startIndex, startIndex + pageSize);
   const nextStartIndex = startIndex + pageSize;
-  const nextCursor =
-    nextStartIndex < sorted.length ? sorted[nextStartIndex - 1]?.key : undefined;
+  const nextCursor = nextStartIndex < sorted.length ? sorted[nextStartIndex - 1]?.key : undefined;
 
   return {
     entries: page,
