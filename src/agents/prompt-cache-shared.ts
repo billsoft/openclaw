@@ -38,6 +38,13 @@ export type SharedPromptCacheManager = {
   acquire(sessionId: string, entry: SharedPromptCacheEntry): void;
   release(sessionId: string, cacheKey: string): void;
 
+  /**
+   * Record actual cache-read tokens returned by the provider for a given session.
+   * Accumulates `estimatedSavingsUsd` on every active entry that session holds.
+   * Call once per LLM turn, after receiving the usage object from the API response.
+   */
+  recordCacheRead(sessionId: string, cacheReadTokens: number): void;
+
   invalidate(cacheKey: string): void;
   invalidateBySession(sessionId: string): void;
 
@@ -193,6 +200,29 @@ function createSharedPromptCacheManager(): SharedPromptCacheManager {
       const entry = entries.get(cacheKey);
       if (entry) {
         entry.sessionIds.delete(sessionId);
+      }
+    },
+
+    recordCacheRead(sessionId, cacheReadTokens) {
+      if (disposed || cacheReadTokens <= 0) {
+        return;
+      }
+      // Find the entries this session is actively holding and credit savings.
+      for (const [, entry] of entries) {
+        if (!entry.sessionIds.has(sessionId)) {
+          continue;
+        }
+        const costPerM =
+          COST_PER_1M_INPUT_TOKENS_USD[entry.provider] ??
+          COST_PER_1M_INPUT_TOKENS_USD.anthropic!;
+        // Cache reads are billed at 10% of normal input price for Anthropic;
+        // use a 0.1 multiplier as a conservative cross-provider approximation.
+        const savedPerM = costPerM * 0.9; // savings = full cost minus cache-read cost (~10%)
+        entry.estimatedSavingsUsd += (cacheReadTokens / 1_000_000) * savedPerM;
+        logDebug(
+          `shared-prompt-cache: recorded ${cacheReadTokens} cache-read tokens for session ${sessionId} ` +
+            `(entry ${entry.cacheKey.slice(0, 16)}..., total saved $${entry.estimatedSavingsUsd.toFixed(4)})`,
+        );
       }
     },
 

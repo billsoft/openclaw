@@ -48,8 +48,11 @@ function getOrCreateSessionState(sessionId: string): PerSessionState {
   return state;
 }
 
-export function resolveSessionMemoryDir(baseDir: string, _sessionId: string): string {
-  return path.join(baseDir, "session-memory");
+export function resolveSessionMemoryDir(baseDir: string, sessionId: string): string {
+  // Each session gets its own notes directory so compaction summaries don't
+  // bleed across unrelated conversations. This matches claude-code's per-session
+  // isolation model where session memory is intra-session rolling context.
+  return path.join(baseDir, "session-memory", sessionId);
 }
 
 export function resolveSessionMemoryPath(baseDir: string, sessionId: string): string {

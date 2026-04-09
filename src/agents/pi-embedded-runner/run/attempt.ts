@@ -2089,6 +2089,11 @@ export async function runEmbeddedAttempt(
 
         try {
           const sharedCacheManager = getSharedPromptCacheManager();
+          // Credit real cache-read savings before releasing the session's entries.
+          const cacheReadTokens = attemptUsage?.cacheRead ?? 0;
+          if (cacheReadTokens > 0) {
+            sharedCacheManager.recordCacheRead(params.sessionId, cacheReadTokens);
+          }
           sharedCacheManager.invalidateBySession(params.sessionId);
         } catch {
           // best-effort cleanup
