@@ -20,7 +20,13 @@ import {
 } from "openclaw/plugin-sdk/memory-core-host-status";
 import { writeDailyDreamingPhaseBlock } from "./dreaming-markdown.js";
 import { generateAndAppendDreamNarrative, type NarrativePhaseData } from "./dreaming-narrative.js";
-import { asRecord, formatErrorMessage, normalizeTrimmedString } from "./dreaming-shared.js";
+import {
+  asRecord,
+  formatErrorMessage,
+  includesSystemEventToken,
+  normalizeTrimmedString,
+} from "./dreaming-shared.js";
+import { runGlobalCurationPhase } from "./global-curation.js";
 import {
   readShortTermRecallEntries,
   recordDreamingPhaseSignals,
@@ -1628,6 +1634,21 @@ export async function runDreamingSweepPhases(params: {
       subagent: params.subagent,
       nowMs: params.nowMs,
     });
+  }
+
+  // Global Memory Curation: runs after all per-workspace phases.
+  // Promotes user-type facts that appear across multiple agents to the shared
+  // global memory layer. Rate-limited to once per 20 hours.
+  try {
+    await runGlobalCurationPhase({
+      cfg: params.cfg,
+      logger: params.logger,
+      nowMs: params.nowMs,
+    });
+  } catch (err) {
+    params.logger.error(
+      `memory-core: global curation phase failed: ${String(err)}`,
+    );
   }
 }
 
