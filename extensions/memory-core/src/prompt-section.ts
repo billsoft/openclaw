@@ -1,6 +1,11 @@
+import path from "node:path";
 import type { MemoryPromptSectionBuilder } from "openclaw/plugin-sdk/memory-core-host-runtime-core";
 import { readMemoryEntrypoint, MEMORY_ENTRYPOINT_NAME } from "./memory-entrypoint.js";
 import { buildTypedMemoryGuidanceLines } from "./prompt-sections-typed.js";
+import {
+  readGlobalMemoryEntrypoint,
+  resolveGlobalMemoryDir,
+} from "openclaw/plugin-sdk/memory-core-host-engine-foundation";
 
 /**
  * Build the memory recall tool guidance lines (search/get instructions + citations).
@@ -100,6 +105,39 @@ export function createTypedMemoryPromptBuilder(
     // don't invalidate the stable cached prefix.
     lines.push(...buildRecallGuidanceLines(availableTools, citationsMode));
 
+    return lines;
+  };
+}
+
+/**
+ * Prompt builder for global memory — shared across all agents.
+ * Injected via registerMemoryPromptSupplement so it appears after the
+ * agent-specific memory section in every agent's system prompt.
+ *
+ * Returns [] when global MEMORY.md is absent or blank, so there is no
+ * prompt overhead for users who have not set up global memory.
+ */
+export function createGlobalMemoryPromptBuilder(stateDir: string): MemoryPromptSectionBuilder {
+  return ({ availableTools }) => {
+    const entrypoint = readGlobalMemoryEntrypoint(stateDir);
+    if (entrypoint.isEmpty) {
+      return [];
+    }
+    const globalDir = resolveGlobalMemoryDir(stateDir);
+    const lines: string[] = [];
+    lines.push("## Global Memory");
+    lines.push(
+      "The following memories are shared across all your agents and workspaces. " +
+        "They represent cross-agent user preferences, facts, and references.",
+    );
+    lines.push("");
+    lines.push(entrypoint.content);
+    lines.push("");
+    if (availableTools.has("memory_search") || availableTools.has("memory_get")) {
+      lines.push(`Global memory files are in: ${path.join(globalDir, "memory")}`);
+      lines.push("Use memory_search or memory_get to retrieve details from global memory files.");
+      lines.push("");
+    }
     return lines;
   };
 }

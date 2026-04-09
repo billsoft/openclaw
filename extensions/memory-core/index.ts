@@ -2,6 +2,7 @@ import path from "node:path";
 import {
   resolveAgentWorkspaceDir,
   resolveDefaultAgentId,
+  resolveStateDir,
 } from "openclaw/plugin-sdk/memory-core-host-engine-foundation";
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 import { registerMemoryCli } from "./src/cli.js";
@@ -14,7 +15,7 @@ import {
   DEFAULT_MEMORY_FLUSH_SOFT_TOKENS,
 } from "./src/flush-plan.js";
 import { registerBuiltInMemoryEmbeddingProviders } from "./src/memory/provider-adapters.js";
-import { buildPromptSection, createTypedMemoryPromptBuilder } from "./src/prompt-section.js";
+import { buildPromptSection, createGlobalMemoryPromptBuilder, createTypedMemoryPromptBuilder } from "./src/prompt-section.js";
 import { listMemoryCorePublicArtifacts } from "./src/public-artifacts.js";
 import { memoryRuntime } from "./src/runtime-provider.js";
 import { createMemoryGetTool, createMemorySearchTool } from "./src/tools.js";
@@ -55,6 +56,14 @@ export default definePluginEntry({
         listArtifacts: listMemoryCorePublicArtifacts,
       },
     });
+
+    // Register global memory as a prompt supplement so it's injected into all
+    // agents' system prompts after the agent-specific memory section.
+    const stateDir = resolveStateDir();
+    api.registerMemoryPromptSupplement(
+      "memory-core-global",
+      createGlobalMemoryPromptBuilder(stateDir),
+    );
 
     api.registerTool(
       (ctx) =>
