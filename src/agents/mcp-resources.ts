@@ -45,12 +45,15 @@ export function invalidateResourceCache(serverName?: string): void {
 }
 
 export function validateResourceUri(uri: string): boolean {
-  if (!uri || typeof uri !== "string") {
+  if (!uri || typeof uri !== "string" || uri.length > 4096) {
     return false;
   }
   try {
-    const parsed = new URL(uri);
-    return ["file:", "http:", "https:", "data:"].includes(parsed.protocol);
+    // Accept any syntactically valid URI — MCP servers may define custom schemes
+    // (e.g. "postgres://...", "git://...", "custom://..."). The MCP spec does not
+    // restrict URI schemes to a fixed allowlist.
+    new URL(uri);
+    return true;
   } catch {
     return false;
   }

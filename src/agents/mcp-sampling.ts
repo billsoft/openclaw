@@ -9,28 +9,24 @@ import type {
 
 const SAMPLING_METHOD = "sampling/createMessage" as const;
 
-export async function hasSamplingCapability(client: Client): Promise<boolean> {
+export function hasSamplingCapability(client: Client): boolean {
+  // Check server capabilities without making an API call.
+  // The MCP SDK exposes getServerCapabilities() for this.
   try {
-    await client.request(
-      {
-        method: SAMPLING_METHOD,
-        params: { messages: [{ role: "user", content: "" }], maxTokens: 1 },
-      },
-      CreateMessageResultSchema,
-    );
-    return true;
+    const caps = client.getServerCapabilities?.();
+    return caps?.sampling !== undefined;
   } catch {
     return false;
   }
 }
 
-export async function detectSamplingCapabilities(
+export function detectSamplingCapabilities(
   sessions: Map<string, { client: Client; serverName: string }>,
-): Promise<McpSamplingCapability> {
+): McpSamplingCapability {
   const serverNames: string[] = [];
   for (const [, session] of sessions) {
     try {
-      if (await hasSamplingCapability(session.client)) {
+      if (hasSamplingCapability(session.client)) {
         serverNames.push(session.serverName);
       }
     } catch {

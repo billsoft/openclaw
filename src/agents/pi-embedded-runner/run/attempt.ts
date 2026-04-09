@@ -60,6 +60,10 @@ import {
 import { DEFAULT_CONTEXT_TOKENS } from "../../defaults.js";
 import { resolveOpenClawDocsPath } from "../../docs-path.js";
 import { extractMemoriesIfNeeded } from "../../extract-memories.js";
+import {
+  completeWithPreparedSimpleCompletionModel,
+  prepareSimpleCompletionModelForAgent,
+} from "../../simple-completion-runtime.js";
 import { isTimeoutError } from "../../failover-error.js";
 import { resolveHeartbeatPromptForSystemPrompt } from "../../heartbeat-system-prompt.js";
 import { resolveImageSanitizationLimits } from "../../image-sanitization.js";
@@ -2241,6 +2245,32 @@ export async function runEmbeddedAttempt(
         });
         const agentIdList = [agentIdsResult.defaultAgentId, agentIdsResult.sessionAgentId];
         for (const aid of agentIdList) {
+          // Build a lightweight spawnFn backed by the simple-completion runtime
+          // (same pattern as llm-ranker). Fire-and-forget; errors are suppressed.
+          const extractSpawnFn = async (spawnParams: { task: string; label: string }) => {
+            const prepared = await prepareSimpleCompletionModelForAgent({
+              cfg: params.config,
+              agentId: aid,
+            });
+            const response = await completeWithPreparedSimpleCompletionModel({
+              ...prepared,
+              userPrompt: spawnParams.task,
+              signal: new AbortController().signal,
+            });
+            const text =
+              response.content
+                .filter((b): b is { type: "text"; text: string } => b.type === "text")
+                .map((b) => b.text)
+                .join("") ?? "";
+            return {
+              messages: [{ role: "assistant", content: text }] as Array<Record<string, unknown>>,
+              totalUsage: {
+                input_tokens: response.usage?.input_tokens ?? 0,
+                output_tokens: response.usage?.output_tokens ?? 0,
+              },
+            };
+          };
+
           extractMemoriesIfNeeded({
             agentId: aid,
             currentTurnIndex: messagesSnapshot.length,
@@ -2251,6 +2281,7 @@ export async function runEmbeddedAttempt(
               memoryDir: path.join(params.agentDir ?? resolveOpenClawAgentDir(), aid, "memory"),
             },
             recentMessages: messagesSnapshot as unknown as Array<Record<string, unknown>>,
+            spawnFn: extractSpawnFn,
           }).catch((err) => {
             log.debug(`extract-memories: skipped for ${aid}: ${String(err)}`);
           });
