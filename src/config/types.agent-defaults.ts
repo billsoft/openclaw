@@ -340,6 +340,17 @@ export type AgentDefaultsConfig = {
     /** Require explicit agentId in sessions_spawn (no default same-as-caller). Default: false. */
     requireAgentId?: boolean;
   };
+  /** Coordinator mode configuration for multi-agent orchestration. */
+  coordinator?: {
+    /** Enable coordinator mode for main agents (depth 0). Default: false. */
+    enabled?: boolean;
+    /** Maximum concurrent workers the coordinator can spawn. Default: 3. */
+    maxWorkers?: number;
+    /** Enable scratchpad directory for cross-worker file exchange. Default: false. */
+    scratchpad?: boolean;
+    /** Scratchpad directory path (default: workspace/.openclaw/scratchpad). */
+    scratchpadDir?: string;
+  };
   /** Optional sandbox settings for non-main sessions. */
   sandbox?: AgentSandboxConfig;
 };

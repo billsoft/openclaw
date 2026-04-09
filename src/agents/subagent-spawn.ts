@@ -109,6 +109,8 @@ export type SpawnSubagentContext = {
   requesterAgentIdOverride?: string;
   /** Explicit workspace directory for subagent to inherit (optional). */
   workspaceDir?: string;
+  /** Shared scratchpad directory for cross-worker file exchange (coordinator mode). */
+  scratchpadDir?: string;
 };
 
 export const SUBAGENT_SPAWN_ACCEPTED_NOTE =
@@ -610,6 +612,22 @@ export async function spawnSubagentDirect(
     childDepth,
     maxSpawnDepth,
   });
+
+  // Add scratchpad hint if provided
+  if (ctx.scratchpadDir) {
+    const scratchpadHint = [
+      "",
+      "## Shared Scratchpad",
+      "",
+      `Path: ${ctx.scratchpadDir}`,
+      "",
+      "This directory is shared with sibling workers spawned by the same coordinator.",
+      "Use it to exchange intermediate results, findings, or data with other workers.",
+      "You can read and write files here without permission prompts.",
+      "",
+    ].join("\n");
+    childSystemPrompt += scratchpadHint;
+  }
 
   let retainOnSessionKeep = false;
   let attachmentsReceipt:

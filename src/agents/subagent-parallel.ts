@@ -1,4 +1,5 @@
 import { logDebug, logWarn } from "../logger.js";
+import { createIsolatedSpawnContext, isAborted, cleanupIsolatedContext } from "./subagent-isolation.js";
 import type { SubagentRunOutcome } from "./subagent-registry.types.js";
 
 export type ParallelTaskDecomposition = {
@@ -22,6 +23,7 @@ export type ParallelSpawnConfig = {
   totalTimeoutMs?: number;
   sharedContext?: string;
   lightContext?: boolean;
+  scratchpadDir?: string;
 };
 
 export type ParallelExecutionResult = {
@@ -86,14 +88,17 @@ function topologicalSort(tasks: ParallelTaskDecomposition[]): ParallelTaskDecomp
 async function executeSingleTask(
   spawnFn: (
     task: ParallelTaskDecomposition,
+    isolatedContext: import("./subagent-isolation.js").IsolatedSpawnContext
   ) => Promise<{ runId: string; outcome?: SubagentRunOutcome; error?: string }>,
   task: ParallelTaskDecomposition,
   config: ParallelSpawnConfig,
-  signal?: AbortSignal,
+  parentAbortController: AbortController,
 ): Promise<ParallelExecutionResult> {
   const startTime = Date.now();
 
-  if (signal?.aborted) {
+  // Early abort check using isolation utilities
+  if (isAborted(parentAbortController.signal)) {
+    logDebug(`parallel-spawn: task ${task.id} cancelled before start`);
     return {
       taskId: task.id,
       status: "cancelled",
@@ -102,16 +107,17 @@ async function executeSingleTask(
   }
 
   const timeout = config.timeoutPerTaskMs ?? DEFAULT_TASK_TIMEOUT_MS;
+  const isolatedContext = createIsolatedSpawnContext(parentAbortController, task.id, config.scratchpadDir);
 
   try {
     const racePromise = Promise.race([
-      spawnFn(task),
+      spawnFn(task, isolatedContext),
       new Promise<never>((_, reject) => setTimeout(() => reject(new Error("timeout")), timeout)),
     ]);
 
     const result = await racePromise;
 
-    if (signal?.aborted) {
+    if (isAborted(parentAbortController.signal)) {
       return {
         taskId: task.id,
         status: "cancelled",
@@ -127,22 +133,22 @@ async function executeSingleTask(
       durationMs: Date.now() - startTime,
     };
   } catch (error) {
-    const errorMsg = String(error);
-    if (errorMsg.includes("timeout")) {
+    if (isAborted(parentAbortController.signal)) {
       return {
         taskId: task.id,
-        status: "timeout",
-        error: `Task timed out after ${timeout}ms`,
+        status: "cancelled",
+        error: String(error),
         durationMs: Date.now() - startTime,
       };
     }
-
     return {
       taskId: task.id,
       status: "failed",
-      error: errorMsg,
+      error: String(error),
       durationMs: Date.now() - startTime,
     };
+  } finally {
+    cleanupIsolatedContext(isolatedContext);
   }
 }
 
@@ -221,7 +227,10 @@ function buildMergeContent(
 export async function executeParallelTasks(
   tasks: ParallelTaskDecomposition[],
   config: ParallelSpawnConfig & {
-    spawnFn: (task: ParallelTaskDecomposition) => Promise<{
+    spawnFn: (
+      task: ParallelTaskDecomposition,
+      isolatedContext: import("./subagent-isolation.js").IsolatedSpawnContext
+    ) => Promise<{
       runId: string;
       outcome?: SubagentRunOutcome;
       error?: string;
@@ -267,7 +276,7 @@ export async function executeParallelTasks(
         return;
       }
 
-      const result = await executeSingleTask(config.spawnFn, task, config, abortController.signal);
+      const result = await executeSingleTask(config.spawnFn, task, config, abortController);
       completedResults.set(task.id, result);
       if (config.failFast && result.status !== "completed") {
         abortController.abort();

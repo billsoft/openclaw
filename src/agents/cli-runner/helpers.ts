@@ -118,6 +118,15 @@ export function buildSystemPrompt(params: {
     contextFiles: params.contextFiles,
     ttsHint,
     memoryCitationsMode: params.config?.memory?.citations,
+    // Coordinator mode: CLI runner is always depth 0, so enable if configured
+    coordinatorMode:
+      params.config?.agents?.defaults?.coordinator?.enabled === true
+        ? {
+            enabled: true,
+            scratchpadDir: params.config?.agents?.defaults?.coordinator?.scratchpadDir,
+            maxWorkers: params.config?.agents?.defaults?.coordinator?.maxWorkers,
+          }
+        : undefined,
   });
 }
 

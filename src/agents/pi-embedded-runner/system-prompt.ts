@@ -55,6 +55,13 @@ export function buildEmbeddedSystemPrompt(params: {
   memoryCitationsMode?: MemoryCitationsMode;
   sessionMemoryContent?: string;
   promptContribution?: ProviderSystemPromptContribution;
+  /** Coordinator mode configuration (depth, scratchpad, MCP clients, etc.) */
+  coordinatorMode?: {
+    enabled: boolean;
+    scratchpadDir?: string;
+    mcpClients?: ReadonlyArray<{ name: string }>;
+    maxWorkers?: number;
+  };
 }): string {
   return buildAgentSystemPrompt({
     workspaceDir: params.workspaceDir,
@@ -86,6 +93,7 @@ export function buildEmbeddedSystemPrompt(params: {
     memoryCitationsMode: params.memoryCitationsMode,
     sessionMemoryContent: params.sessionMemoryContent,
     promptContribution: params.promptContribution,
+    coordinatorMode: params.coordinatorMode,
   });
 }
 

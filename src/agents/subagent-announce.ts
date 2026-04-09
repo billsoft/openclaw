@@ -154,6 +154,14 @@ export function buildSubagentSystemPrompt(params: {
     );
   }
 
+  // Define the stable cache boundary before dynamic session/task context
+  lines.push(
+    "---",
+    "END OF STABLE SYSTEM INSTRUCTIONS",
+    "---",
+    "",
+  );
+
   lines.push(
     "## Session Context",
     ...[

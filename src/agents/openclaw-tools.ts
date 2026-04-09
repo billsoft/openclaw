@@ -110,6 +110,12 @@ export function createOpenClawTools(
   } & SpawnedToolContext,
 ): AnyAgentTool[] {
   const resolvedConfig = options?.config ?? openClawToolsDeps.config;
+  // Resolve scratchpad directory for coordinator mode (passed to spawn tools)
+  const coordinatorCfg = resolvedConfig?.agents?.defaults?.coordinator;
+  const scratchpadDir =
+    coordinatorCfg?.enabled === true && coordinatorCfg?.scratchpad === true
+      ? coordinatorCfg?.scratchpadDir ?? undefined
+      : undefined;
   const sessionAgentId = resolveSessionAgentId({
     sessionKey: options?.agentSessionKey,
     config: resolvedConfig,
@@ -273,6 +279,7 @@ export function createOpenClawTools(
       sandboxed: options?.sandboxed,
       requesterAgentIdOverride: options?.requesterAgentIdOverride,
       workspaceDir: spawnWorkspaceDir,
+      scratchpadDir,
     }),
     createSubagentsTool({
       agentSessionKey: options?.agentSessionKey,
@@ -289,6 +296,7 @@ export function createOpenClawTools(
       sandboxed: options?.sandboxed,
       requesterAgentIdOverride: options?.requesterAgentIdOverride,
       workspaceDir: spawnWorkspaceDir,
+      scratchpadDir,
     }),
     createSessionStatusTool({
       agentSessionKey: options?.agentSessionKey,

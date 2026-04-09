@@ -81,6 +81,7 @@ type SpawnedToolContext = {
   sandboxed?: boolean;
   requesterAgentIdOverride?: string;
   workspaceDir?: string;
+  scratchpadDir?: string;
 };
 
 export function createParallelSpawnTool(opts?: SpawnedToolContext): AnyAgentTool {
@@ -90,7 +91,7 @@ export function createParallelSpawnTool(opts?: SpawnedToolContext): AnyAgentTool
     displaySummary: PARALLEL_SPAWN_TOOL_DISPLAY_SUMMARY,
     description: describeParallelSpawnTool(),
     parameters: ParallelSpawnToolSchema,
-    execute: async (_toolCallId, args) => {
+    execute: async (_toolCallId: string, args: unknown) => {
       const params = args as Record<string, unknown>;
       const rawTasks = params.tasks as Array<Record<string, unknown>>;
 
@@ -130,7 +131,10 @@ export function createParallelSpawnTool(opts?: SpawnedToolContext): AnyAgentTool
 
       const rawConfig = params.config as Record<string, unknown> | undefined;
       const config: ParallelSpawnConfig & {
-        spawnFn: (task: ParallelTaskDecomposition) => Promise<{
+        spawnFn: (
+          task: ParallelTaskDecomposition,
+          isolatedContext: import("../subagent-isolation.js").IsolatedSpawnContext
+        ) => Promise<{
           runId: string;
           outcome?: SubagentRunOutcome;
           error?: string;
@@ -148,7 +152,7 @@ export function createParallelSpawnTool(opts?: SpawnedToolContext): AnyAgentTool
         sharedContext: readStringParam(rawConfig ?? {}, "sharedContext"),
         lightContext: rawConfig?.lightContext === true,
 
-        spawnFn: async (task) => {
+        spawnFn: async (task, isolatedContext) => {
           try {
             const result = await spawnSubagentDirect(
               {
@@ -173,6 +177,7 @@ export function createParallelSpawnTool(opts?: SpawnedToolContext): AnyAgentTool
                 agentGroupSpace: opts?.agentGroupSpace,
                 requesterAgentIdOverride: opts?.requesterAgentIdOverride,
                 workspaceDir: opts?.workspaceDir,
+                scratchpadDir: isolatedContext.taskScratchDir ?? opts?.scratchpadDir,
               },
             );
 

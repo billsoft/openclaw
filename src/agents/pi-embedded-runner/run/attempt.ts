@@ -145,6 +145,12 @@ import {
 import { buildEmbeddedSandboxInfo } from "../sandbox-info.js";
 import { prewarmSessionFile, trackSessionManagerAccess } from "../session-manager-cache.js";
 import { prepareSessionManagerForRun } from "../session-manager-init.js";
+import {
+  cleanupScratchpadDir,
+  ensureScratchpadDir,
+  isScratchpadEnabled,
+  resolveScratchpadDir,
+} from "../../scratchpad.js";
 import { resolveEmbeddedRunSkillEntries } from "../skills-runtime.js";
 import {
   describeEmbeddedAgentStreamStrategy,
@@ -373,8 +379,19 @@ export async function runEmbeddedAttempt(
     agentId: params.agentId,
   });
 
+  const promptMode = resolvePromptModeForSession(params.sessionKey);
+  const isCoordinatorEnabled =
+    promptMode === "full" && params.config?.agents?.defaults?.coordinator?.enabled === true;
+  const scratchpadDir = isCoordinatorEnabled
+    ? params.config?.agents?.defaults?.coordinator?.scratchpadDir
+    : undefined;
+
   let restoreSkillEnv: (() => void) | undefined;
   try {
+    if (scratchpadDir) {
+      await ensureScratchpadDir(scratchpadDir);
+    }
+
     const { shouldLoadSkillEntries, skillEntries } = resolveEmbeddedRunSkillEntries({
       workspaceDir: effectiveWorkspace,
       config: params.config,
@@ -806,6 +823,16 @@ export async function runEmbeddedAttempt(
             params.sessionId,
           ).catch(() => undefined)) ?? undefined,
         promptContribution,
+        // Coordinator mode: only inject for main agents (non-subagent, non-cron sessions)
+        coordinatorMode:
+          effectivePromptMode === "full" &&
+          params.config?.agents?.defaults?.coordinator?.enabled === true
+            ? {
+                enabled: true,
+                scratchpadDir: params.config?.agents?.defaults?.coordinator?.scratchpadDir,
+                maxWorkers: params.config?.agents?.defaults?.coordinator?.maxWorkers,
+              }
+            : undefined,
       });
     const systemPromptReport = buildSystemPromptReport({
       source: "run",
@@ -2472,6 +2499,11 @@ export async function runEmbeddedAttempt(
       });
     }
   } finally {
+    if (scratchpadDir) {
+      await cleanupScratchpadDir(scratchpadDir).catch((err) => {
+        log.warn(`Failed to cleanup scratchpad dir: ${String(err)}`);
+      });
+    }
     restoreSkillEnv?.();
   }
 }

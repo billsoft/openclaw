@@ -136,6 +136,7 @@ export function createSessionsSpawnTool(
     sandboxed?: boolean;
     /** Explicit agent ID override for cron/hook sessions where session key parsing may not work. */
     requesterAgentIdOverride?: string;
+    scratchpadDir?: string;
   } & SpawnedToolContext,
 ): AnyAgentTool {
   return {
@@ -144,7 +145,7 @@ export function createSessionsSpawnTool(
     displaySummary: SESSIONS_SPAWN_TOOL_DISPLAY_SUMMARY,
     description: describeSessionsSpawnTool(),
     parameters: SessionsSpawnToolSchema,
-    execute: async (_toolCallId, args) => {
+    execute: async (_toolCallId: string, args: unknown) => {
       const params = args as Record<string, unknown>;
       const unsupportedParam = UNSUPPORTED_SESSIONS_SPAWN_PARAM_KEYS.find((key) =>
         Object.hasOwn(params, key),
@@ -329,6 +330,7 @@ export function createSessionsSpawnTool(
           agentGroupSpace: opts?.agentGroupSpace,
           requesterAgentIdOverride: opts?.requesterAgentIdOverride,
           workspaceDir: opts?.workspaceDir,
+          scratchpadDir: opts?.scratchpadDir,
         },
       );
 

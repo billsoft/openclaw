@@ -139,6 +139,15 @@ export async function resolveCommandsSystemPromptBundle(
     runtimeInfo,
     sandboxInfo,
     memoryCitationsMode: params.cfg?.memory?.citations,
+    // Coordinator mode for auto-reply command context
+    coordinatorMode:
+      params.cfg?.agents?.defaults?.coordinator?.enabled === true
+        ? {
+            enabled: true,
+            scratchpadDir: params.cfg?.agents?.defaults?.coordinator?.scratchpadDir,
+            maxWorkers: params.cfg?.agents?.defaults?.coordinator?.maxWorkers,
+          }
+        : undefined,
   });
 
   return { systemPrompt, tools, skillsPrompt, bootstrapFiles, injectedFiles, sandboxRuntime };

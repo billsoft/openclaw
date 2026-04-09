@@ -10,6 +10,7 @@ import {
   normalizeOptionalLowercaseString,
 } from "../shared/string-coerce.js";
 import { listDeliverableMessageChannels } from "../utils/message-channel.js";
+import { buildCoordinatorSystemPrompt } from "./coordinator/coordinator-prompt.js";
 import type { ResolvedTimeFormat } from "./date-time.js";
 import type { EmbeddedContextFile } from "./pi-embedded-helpers.js";
 import type { EmbeddedSandboxInfo } from "./pi-embedded-runner/types.js";
@@ -365,6 +366,13 @@ export function buildAgentSystemPrompt(params: {
   /** Session memory notes content (from session-memory/notes.md). Injected as ## Session Memory section if non-empty. */
   sessionMemoryContent?: string;
   promptContribution?: ProviderSystemPromptContribution;
+  /** Coordinator mode configuration (depth, scratchpad, MCP clients, etc.) */
+  coordinatorMode?: {
+    enabled: boolean;
+    scratchpadDir?: string;
+    mcpClients?: ReadonlyArray<{ name: string }>;
+    maxWorkers?: number;
+  };
 }) {
   const acpEnabled = params.acpEnabled !== false;
   const sandboxedRuntime = params.sandboxInfo?.enabled === true;
@@ -705,6 +713,17 @@ export function buildAgentSystemPrompt(params: {
   }
   if (reasoningHint) {
     lines.push("## Reasoning Format", reasoningHint, "");
+  }
+
+  // Inject coordinator mode prompt if enabled
+  if (params.coordinatorMode?.enabled && !isMinimal) {
+    const coordinatorPrompt = buildCoordinatorSystemPrompt({
+      workerTools: canonicalToolNames,
+      scratchpadDir: params.coordinatorMode.scratchpadDir,
+      mcpServers: params.coordinatorMode.mcpClients?.map((c) => c.name),
+      maxWorkers: params.coordinatorMode.maxWorkers,
+    });
+    lines.push(coordinatorPrompt, "");
   }
 
   const contextFiles = params.contextFiles ?? [];
