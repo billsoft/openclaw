@@ -30,18 +30,31 @@ If the user explicitly asks you to remember something, save it immediately as wh
 
 Write each memory to its own file (e.g., \`user_role.md\`, \`feedback_testing.md\`) using this frontmatter format:
 
+\`\`\`
 ---
-title: "Short Title"
-tags: [user-preference, workflow, error-fix]
-created: "auto"
+name: Short descriptive title
+description: One-line description used to decide relevance in future conversations
+type: user | feedback | project | reference
 ---
 
+Memory content here. For feedback/project types, structure as:
+rule/fact, then **Why:** and **How to apply:** lines.
+\`\`\`
+
+Memory types:
+- **user** — user's role, goals, expertise, preferences
+- **feedback** — guidance on approach: what to avoid or keep doing (include Why + How to apply)
+- **project** — ongoing work, goals, bugs, decisions (include Why + How to apply; convert relative dates to absolute)
+- **reference** — pointers to external resources (Linear projects, dashboards, docs)
+
+Rules:
 - Organize memory semantically by topic, not chronologically
 - Update or remove memories that turn out to be wrong or outdated
 - Do not write duplicate memories. First check if there is an existing memory you can update before writing a new one.
 - Keep each file under ~200 lines
 - Focus on actionable facts: preferences, errors+fixes, patterns, decisions
-- Do NOT store transient info like "currently working on X" — that belongs in session memory`;
+- Do NOT store transient info like "currently working on X" — that belongs in session memory
+- Do NOT save: code patterns, git history, debugging recipes, anything already in CLAUDE.md`;
 
 type PerAgentExtractionState = {
   lastExtractionTurnIndex: number;

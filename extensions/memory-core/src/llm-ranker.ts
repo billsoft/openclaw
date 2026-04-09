@@ -34,6 +34,7 @@ import {
   completeWithPreparedSimpleCompletionModel,
   extractAssistantText,
   prepareSimpleCompletionModelForAgent,
+  resolveSidecarModelRef,
 } from "openclaw/plugin-sdk/simple-completion-runtime";
 
 /** Maximum memories the ranker will select per query. */
@@ -210,6 +211,7 @@ async function selectRelevantMemoriesViaLLM(params: {
   const prepared = await prepareSimpleCompletionModelForAgent({
     cfg,
     agentId,
+    modelRef: resolveSidecarModelRef(cfg),
     allowMissingApiKeyModes: ["aws-sdk"],
   });
   if ("error" in prepared) {

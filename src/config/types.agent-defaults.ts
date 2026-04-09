@@ -200,6 +200,14 @@ export type AgentDefaultsConfig = {
   envelopeElapsed?: "on" | "off";
   /** Optional context window cap (used for runtime estimates + status %). */
   contextTokens?: number;
+  /**
+   * Optional lightweight sidecar model for auxiliary LLM tasks (memory ranking,
+   * extract-memories, session-memory extraction). Uses provider/model format
+   * (e.g. "minimax/MiniMax-M2.7"). Falls back to the agent's primary model when unset.
+   * Ideal for routing to a cheap/fast model (e.g. MiniMax-M2.7-highspeed) so
+   * sidecar calls do not consume the main model's quota.
+   */
+  sidecarModelRef?: string;
   /** Optional CLI backends for text-only fallback (claude-cli, etc.). */
   cliBackends?: Record<string, CliBackendConfig>;
   /** Opt-in: prune old tool results from the LLM context to reduce token usage. */

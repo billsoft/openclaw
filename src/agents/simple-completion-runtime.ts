@@ -199,6 +199,15 @@ export async function prepareSimpleCompletionModel(params: {
   };
 }
 
+/**
+ * Resolve the sidecar model ref from config (agents.defaults.sidecarModelRef).
+ * Returns undefined when not configured, which causes callers to fall back to
+ * the agent's primary model.
+ */
+export function resolveSidecarModelRef(cfg: OpenClawConfig): string | undefined {
+  return cfg.agents?.defaults?.sidecarModelRef?.trim() || undefined;
+}
+
 export async function prepareSimpleCompletionModelForAgent(params: {
   cfg: OpenClawConfig;
   agentId: string;

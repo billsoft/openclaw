@@ -63,6 +63,7 @@ import { extractMemoriesIfNeeded } from "../../extract-memories.js";
 import {
   completeWithPreparedSimpleCompletionModel,
   prepareSimpleCompletionModelForAgent,
+  resolveSidecarModelRef,
 } from "../../simple-completion-runtime.js";
 import { isTimeoutError } from "../../failover-error.js";
 import { resolveHeartbeatPromptForSystemPrompt } from "../../heartbeat-system-prompt.js";
@@ -2093,15 +2094,6 @@ export async function runEmbeddedAttempt(
           // best-effort cleanup
         }
 
-        extractSessionMemoryIfNeeded({
-          baseDir: params.agentDir ?? resolveOpenClawAgentDir(),
-          sessionId: params.sessionId,
-          messages: messagesSnapshot as unknown as Array<Record<string, unknown>>,
-          currentTokenCount: messagesSnapshot.length * 200,
-          hasToolCallsInLastTurn: toolMetas.length > 0,
-        }).catch((err) => {
-          log.debug(`session-memory: post-turn extraction skipped: ${String(err)}`);
-        });
         const lastCallUsage = normalizeUsage(
           (currentAttemptAssistant as { usage?: UsageLike } | undefined)?.usage,
         );
@@ -2244,24 +2236,37 @@ export async function runEmbeddedAttempt(
           config: params.config,
         });
         const agentIdList = [agentIdsResult.defaultAgentId, agentIdsResult.sessionAgentId];
-        for (const aid of agentIdList) {
-          // Build a lightweight spawnFn backed by the simple-completion runtime
-          // (same pattern as llm-ranker). Fire-and-forget; errors are suppressed.
-          const extractSpawnFn = async (spawnParams: { task: string; label: string }) => {
+
+        // Build a lightweight spawnFn backed by the simple-completion runtime.
+        // Used for both session-memory and per-agent extract-memories.
+        // When agents.defaults.sidecarModelRef is set, sidecar calls route to that
+        // model (e.g. minimax/MiniMax-M2.7) instead of the agent's primary model.
+        // Fire-and-forget callers suppress errors; this fn throws on model resolution failure.
+        const sidecarModelRef = resolveSidecarModelRef(params.config);
+        const buildSidecarSpawnFn = (agentId: string) =>
+          async (spawnParams: { task: string; label: string }) => {
             const prepared = await prepareSimpleCompletionModelForAgent({
               cfg: params.config,
-              agentId: aid,
+              agentId,
+              modelRef: sidecarModelRef,
             });
+            if ("error" in prepared) {
+              throw new Error(
+                `sidecar-spawn(${spawnParams.label}): model resolution failed: ${prepared.error}`,
+              );
+            }
             const response = await completeWithPreparedSimpleCompletionModel({
-              ...prepared,
-              userPrompt: spawnParams.task,
-              signal: new AbortController().signal,
+              model: prepared.model,
+              auth: prepared.auth,
+              context: {
+                messages: [{ role: "user", content: spawnParams.task }],
+              },
+              options: { signal: new AbortController().signal },
             });
-            const text =
-              response.content
-                .filter((b): b is { type: "text"; text: string } => b.type === "text")
-                .map((b) => b.text)
-                .join("") ?? "";
+            const text = response.content
+              .filter((b): b is { type: "text"; text: string } => b.type === "text")
+              .map((b) => b.text)
+              .join("");
             return {
               messages: [{ role: "assistant", content: text }] as Array<Record<string, unknown>>,
               totalUsage: {
@@ -2271,6 +2276,20 @@ export async function runEmbeddedAttempt(
             };
           };
 
+        // Session-memory extraction: scoped to session, use default agent's model.
+        const sessionMemorySpawnFn = buildSidecarSpawnFn(agentIdsResult.defaultAgentId);
+        extractSessionMemoryIfNeeded({
+          baseDir: params.agentDir ?? resolveOpenClawAgentDir(),
+          sessionId: params.sessionId,
+          messages: messagesSnapshot as unknown as Array<Record<string, unknown>>,
+          currentTokenCount: messagesSnapshot.length * 200,
+          hasToolCallsInLastTurn: toolMetas.length > 0,
+          spawnFn: sessionMemorySpawnFn,
+        }).catch((err) => {
+          log.debug(`session-memory: post-turn extraction skipped: ${String(err)}`);
+        });
+
+        for (const aid of agentIdList) {
           extractMemoriesIfNeeded({
             agentId: aid,
             currentTurnIndex: messagesSnapshot.length,
@@ -2281,7 +2300,7 @@ export async function runEmbeddedAttempt(
               memoryDir: path.join(params.agentDir ?? resolveOpenClawAgentDir(), aid, "memory"),
             },
             recentMessages: messagesSnapshot as unknown as Array<Record<string, unknown>>,
-            spawnFn: extractSpawnFn,
+            spawnFn: buildSidecarSpawnFn(aid),
           }).catch((err) => {
             log.debug(`extract-memories: skipped for ${aid}: ${String(err)}`);
           });
