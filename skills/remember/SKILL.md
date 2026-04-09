@@ -1,6 +1,6 @@
 ---
 name: remember
-description: 'Save something to persistent memory so it survives across sessions and compactions. Use when user says "remember this", "save this", "note that", or any explicit request to retain information long-term. Writes to the agent memory directory using the 4-type taxonomy (user/feedback/project/reference).'
+description: 'Save something to persistent memory so it survives across sessions and compactions. Chooses between global memory (cross-agent user facts) and per-agent memory (project/feedback/reference). Use when user says "remember this", "save this", "note that", or any explicit request to retain information long-term.'
 metadata:
   {
     "openclaw":
@@ -27,17 +27,24 @@ Use this skill immediately when the user says:
 - "keep in mind..."
 - any explicit instruction to retain something long-term
 
-## Memory directory
+## Memory tiers
 
-Write files to the agent memory directory. OpenClaw injects `MEMORY.md` (an index of saved files)
-into the system prompt at startup. The memory directory is typically at:
+OpenClaw has two memory tiers. Choose based on the memory type:
 
-```
-~/.openclaw/agents/<agentId>/memory/
-```
+| Tier | Path | When to use |
+|---|---|---|
+| **Global** | `~/.openclaw/global-memory/memory/` | `user` type facts: personal identity, preferences, habits that apply across ALL agents |
+| **Per-agent** | `~/.openclaw/agents/<agentId>/memory/` | `feedback`, `project`, `reference`; or user facts specific to this agent/workspace |
 
-Read `MEMORY.md` first to see what files already exist, then update an existing file or create a
-new one — never create a duplicate.
+**Default rule**: prefer global for `user` type, per-agent for everything else.
+
+### Which MEMORY.md to update
+
+After writing a memory file, update the matching index:
+- Global tier → `~/.openclaw/global-memory/MEMORY.md`
+- Per-agent tier → `{agentWorkspaceDir}/MEMORY.md`
+
+Read the target MEMORY.md first to see what files already exist.
 
 ## How to save a memory
 
@@ -72,16 +79,17 @@ Memory content here.
 
 ## Efficient two-turn strategy
 
-**Turn 1** — Read all files you might need to update:
+**Turn 1** — Read all files you might need, in parallel:
 ```
-Read MEMORY.md  (to see what exists)
-Read <existing-file>.md  (if updating)
+Read ~/.openclaw/global-memory/MEMORY.md     (if saving user-type memory)
+Read {agentWorkspaceDir}/MEMORY.md           (if saving other types)
+Read <existing-file>.md                      (if updating an existing file)
 ```
 
 **Turn 2** — Write/Edit in parallel:
 ```
-Write <new-file>.md  (new memory)
-Edit <existing-file>.md  (update existing)
+Write <new-file>.md      (create new memory in the correct tier directory)
+Edit MEMORY.md           (add pointer to the new file in the correct index)
 ```
 
 Never investigate the codebase during a memory-save turn — only act on what the user just told you.
@@ -125,4 +133,24 @@ type: reference
 ---
 
 All bugs are tracked in Linear project **INFRA**. Use this project ID when linking issues.
+```
+
+### User says "remember I'm a vegetarian"
+
+This is a personal fact that applies across all agents → **global tier**.
+
+Write to `~/.openclaw/global-memory/memory/user_diet.md`:
+```markdown
+---
+name: Dietary preference
+description: User is vegetarian — avoid suggesting meat-based options
+type: user
+---
+
+User is vegetarian. When suggesting recipes, restaurants, or food-related content, always use vegetarian options. Never suggest meat.
+```
+
+Then update `~/.openclaw/global-memory/MEMORY.md`:
+```
+- [Dietary preference](memory/user_diet.md) — User is vegetarian
 ```
