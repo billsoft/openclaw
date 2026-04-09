@@ -2249,6 +2249,7 @@ export type OpenClawPluginApi = {
   ) => void;
   /** Register an additive memory-adjacent prompt section (non-exclusive). */
   registerMemoryPromptSupplement: (
+    pluginId: string,
     builder: import("./memory-state.js").MemoryPromptSectionBuilder,
   ) => void;
   /** Register an additive memory-adjacent search/read corpus supplement (non-exclusive). */

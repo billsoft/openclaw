@@ -20,7 +20,7 @@ export default definePluginEntry({
   register(api) {
     const config = resolveMemoryWikiConfig(api.pluginConfig);
 
-    api.registerMemoryPromptSupplement(createWikiPromptSectionBuilder(config));
+    api.registerMemoryPromptSupplement("memory-wiki", createWikiPromptSectionBuilder(config));
     api.registerMemoryCorpusSupplement(
       createWikiCorpusSupplement({ config, appConfig: api.config }),
     );

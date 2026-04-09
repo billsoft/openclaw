@@ -1176,8 +1176,8 @@ export function createPluginRegistry(registryParams: PluginRegistryParams) {
                 }
                 registerMemoryPromptSection(builder);
               },
-              registerMemoryPromptSupplement: (builder) => {
-                registerMemoryPromptSupplement(record.id, builder);
+              registerMemoryPromptSupplement: (pluginId, builder) => {
+                registerMemoryPromptSupplement(pluginId, builder);
               },
               registerMemoryCorpusSupplement: (supplement) => {
                 registerMemoryCorpusSupplement(record.id, supplement);
