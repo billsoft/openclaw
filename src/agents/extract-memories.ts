@@ -1,6 +1,8 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { logInfo, logWarn, logDebug } from "../logger.js";
+import { resolveGlobalMemoryDir } from "../memory-host-sdk/global-memory.js";
+import { resolveStateDir } from "../config/paths.js";
 
 export type ExtractMemoriesConfig = {
   enabled: boolean;
@@ -16,45 +18,51 @@ export const DEFAULT_EXTRACT_MEMORIES_CONFIG: ExtractMemoriesConfig = {
   memoryDir: "",
 };
 
-const EXTRACTION_PROMPT = `You are now acting as the memory extraction subagent. Analyze the most recent messages above and use them to update your persistent memory systems.
+/**
+ * System prompt for the memory extraction LLM call.
+ * The model receives recent messages and outputs JSON describing what to save.
+ */
+const EXTRACTION_SYSTEM_PROMPT = `You are a memory extraction assistant. Analyze the recent conversation and decide what facts are worth saving to persistent memory.
 
-Available tools: Read, Grep, Glob, read-only Bash (ls/find/cat/stat/wc/head/tail and similar), and Edit/Write for paths inside the memory directory only. Bash rm is not permitted. All other tools will be denied.
+Respond ONLY with a JSON object in this exact format — no markdown fences, no extra text:
+{"memories":[{"filename":"descriptive_name.md","tier":"global"|"per-agent","content":"---\\nname: ...\\ndescription: ...\\ntype: user|feedback|project|reference\\n---\\n\\nContent here."}]}
 
-You have a limited turn budget. Edit requires a prior Read of the same file, so the efficient strategy is: turn 1 — issue all Read calls in parallel for every file you might update; turn 2 — issue all Write/Edit calls in parallel.
+If nothing is worth saving, respond with: {"memories":[]}
 
-You MUST only use content from the last messages to update your persistent memories. Do not waste any turns investigating or verifying that content further — no grepping source files, no reading code to confirm a pattern exists, no git commands.
+## Memory tiers
 
-If the user explicitly asks you to remember something, save it immediately as whichever type fits best. If they ask you to forget something, find and remove the relevant entry.
+- **"global"** — cross-agent user facts: personal identity, preferences that apply everywhere (e.g., "user prefers TypeScript", "user is vegetarian", "timezone UTC+8"). Written to the global memory directory, shared across ALL agents.
+- **"per-agent"** — everything else: feedback, project decisions, references, or user facts specific to this agent/workspace.
 
-## How to save memories
+## Memory type guide (use in frontmatter \`type:\` field)
 
-Write each memory to its own file (e.g., \`user_role.md\`, \`feedback_testing.md\`) using this frontmatter format:
+- **user** — facts about the person (role, goals, expertise, cross-agent preferences) → prefer "global" tier
+- **feedback** — guidance on approach, what to avoid/keep doing. Include **Why:** and **How to apply:** → per-agent
+- **project** — ongoing work, decisions, bugs, deadlines. Include **Why:** and **How to apply:**; convert relative dates to absolute → per-agent
+- **reference** — pointers to external resources (URLs, board names, dashboards) → per-agent
 
-\`\`\`
----
-name: Short descriptive title
-description: One-line description used to decide relevance in future conversations
-type: user | feedback | project | reference
----
+## Rules
 
-Memory content here. For feedback/project types, structure as:
-rule/fact, then **Why:** and **How to apply:** lines.
-\`\`\`
+- One file per distinct topic. Use snake_case filenames ending in .md.
+- Do NOT save: code patterns, git history, debugging recipes, transient "currently working on X" state.
+- Do NOT duplicate: if a memory updates an existing file, set the same filename so we can overwrite it.`;
 
-Memory types:
-- **user** — user's role, goals, expertise, preferences
-- **feedback** — guidance on approach: what to avoid or keep doing (include Why + How to apply)
-- **project** — ongoing work, goals, bugs, decisions (include Why + How to apply; convert relative dates to absolute)
-- **reference** — pointers to external resources (Linear projects, dashboards, docs)
-
-Rules:
-- Organize memory semantically by topic, not chronologically
-- Update or remove memories that turn out to be wrong or outdated
-- Do not write duplicate memories. First check if there is an existing memory you can update before writing a new one.
-- Keep each file under ~200 lines
-- Focus on actionable facts: preferences, errors+fixes, patterns, decisions
-- Do NOT store transient info like "currently working on X" — that belongs in session memory
-- Do NOT save: code patterns, git history, debugging recipes, anything already in CLAUDE.md`;
+function buildExtractionUserMessage(params: {
+  memoryDir: string;
+  globalMemoryDir: string;
+  existingFilesManifest: string;
+}): string {
+  const { memoryDir, globalMemoryDir, existingFilesManifest } = params;
+  const globalFilesDir = path.join(globalMemoryDir, "memory");
+  let msg =
+    `Per-agent memory directory: ${memoryDir}\n` +
+    `Global memory directory: ${globalFilesDir}\n\n` +
+    `Based on the conversation above, extract any facts worth saving.`;
+  if (existingFilesManifest) {
+    msg += `\n\n${existingFilesManifest}\n\nAvoid duplicates — prefer reusing the same filename to overwrite an existing file.`;
+  }
+  return msg;
+}
 
 type PerAgentExtractionState = {
   lastExtractionTurnIndex: number;
@@ -114,6 +122,68 @@ export function formatMemoryManifest(
   return `## Existing memory files\n\n${lines.join("\n")}\n\nCheck this list before writing — update an existing file rather than creating a duplicate.`;
 }
 
+type ExtractionMemoryEntry = {
+  filename: string;
+  tier: string;
+  content: string;
+};
+
+/**
+ * Parse the LLM's JSON output and write memory files to disk.
+ * Silently skips malformed entries or write failures.
+ */
+async function applyExtractionResult(
+  text: string,
+  memoryDir: string,
+  globalMemoryDir: string,
+): Promise<void> {
+  const jsonMatch = /\{[\s\S]*\}/.exec(text);
+  if (!jsonMatch) {
+    return;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(jsonMatch[0]);
+  } catch {
+    return;
+  }
+  if (!parsed || typeof parsed !== "object") {
+    return;
+  }
+  const memories = (parsed as { memories?: unknown[] }).memories;
+  if (!Array.isArray(memories) || memories.length === 0) {
+    return;
+  }
+  for (const entry of memories) {
+    if (!entry || typeof entry !== "object") {
+      continue;
+    }
+    const m = entry as Partial<ExtractionMemoryEntry>;
+    if (
+      typeof m.filename !== "string" ||
+      !m.filename ||
+      typeof m.content !== "string" ||
+      !m.content
+    ) {
+      continue;
+    }
+    // Sanitize: allow only safe filenames, always end in .md
+    const safeName =
+      path
+        .basename(m.filename)
+        .replace(/[^a-zA-Z0-9_\-]/g, "_")
+        .replace(/\.md$/, "") + ".md";
+    const targetDir =
+      m.tier === "global" ? path.join(globalMemoryDir, "memory") : memoryDir;
+    const filePath = path.join(targetDir, safeName);
+    try {
+      await fs.writeFile(filePath, m.content, { encoding: "utf-8", mode: 0o600 });
+    } catch {
+      // Skip individual failures silently; don't abort the loop.
+    }
+  }
+}
+
 export function shouldExtractMemories(
   agentId: string,
   currentTurnIndex: number,
@@ -160,22 +230,48 @@ export async function extractMemoriesIfNeeded(params: ExtractMemoriesParams): Pr
 
   await ensureMemoryDir(config);
 
+  // Resolve and ensure global memory directories exist.
+  const globalMemoryDir = resolveGlobalMemoryDir(resolveStateDir());
+  await fs.mkdir(path.join(globalMemoryDir, "memory"), { mode: 0o700, recursive: true });
+
   let manifest = "";
   if (config.memoryDir) {
-    const existingFiles = await scanExistingMemoryFiles(config.memoryDir);
-    manifest = formatMemoryManifest(existingFiles);
+    const [agentFiles, globalFiles] = await Promise.all([
+      scanExistingMemoryFiles(config.memoryDir),
+      scanExistingMemoryFiles(path.join(globalMemoryDir, "memory")),
+    ]);
+    const allFiles = [
+      ...agentFiles.map((f) => ({ ...f, name: `[per-agent] ${f.name}` })),
+      ...globalFiles.map((f) => ({ ...f, name: `[global] ${f.name}` })),
+    ];
+    manifest = formatMemoryManifest(allFiles);
   }
 
-  const userPrompt = EXTRACTION_PROMPT + (manifest ? `\n\n${manifest}` : "");
+  const userMessage = buildExtractionUserMessage({
+    memoryDir: config.memoryDir,
+    globalMemoryDir,
+    existingFilesManifest: manifest,
+  });
 
+  // The spawnFn is a simple-completion call. We pass EXTRACTION_SYSTEM_PROMPT
+  // as system and userMessage as user content; the model outputs JSON.
+  // We then parse that JSON and write files ourselves (applyExtractionResult).
   try {
     const result = await spawnFn({
-      task: userPrompt,
+      task: `${EXTRACTION_SYSTEM_PROMPT}\n\n---\n\n${userMessage}`,
       label: "extract_memories",
     });
 
     state.lastExtractionTurnIndex = currentTurnIndex;
     state.extractionsCount++;
+
+    // Parse the LLM's JSON output and write memory files to disk.
+    const lastMsg = result.messages[result.messages.length - 1];
+    const text =
+      typeof lastMsg?.content === "string"
+        ? lastMsg.content
+        : "";
+    await applyExtractionResult(text, config.memoryDir, globalMemoryDir);
 
     logInfo(
       `extract-memories: completed for agent=${agentId} turn=${currentTurnIndex} ` +
