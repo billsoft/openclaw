@@ -67,20 +67,29 @@ type PromotionEntry = {
 
 // ── Frontmatter parsing ───────────────────────────────────────────────────────
 
-function parseUserTypeFrontmatter(
-  text: string,
-): { description: string | null; isUserType: boolean } {
-  if (!text.startsWith("---")) return { description: null, isUserType: false };
+function parseUserTypeFrontmatter(text: string): {
+  description: string | null;
+  isUserType: boolean;
+} {
+  if (!text.startsWith("---")) {
+    return { description: null, isUserType: false };
+  }
   const end = text.indexOf("\n---", 3);
-  if (end === -1) return { description: null, isUserType: false };
+  if (end === -1) {
+    return { description: null, isUserType: false };
+  }
   const block = text.slice(3, end);
   let description: string | null = null;
   let isUserType = false;
   for (const line of block.split("\n")) {
     const t = line.trim();
     const desc = /^description\s*:\s*(.+)$/.exec(t);
-    if (desc) description = desc[1]!.trim().replace(/^["']|["']$/g, "");
-    if (/^type\s*:\s*user\s*$/.test(t)) isUserType = true;
+    if (desc) {
+      description = desc[1].trim().replace(/^["']|["']$/g, "");
+    }
+    if (/^type\s*:\s*user\s*$/.test(t)) {
+      isUserType = true;
+    }
   }
   return { description, isUserType };
 }
@@ -109,13 +118,17 @@ async function scanUserFactsAcrossAgents(
       const filePath = path.join(memDir, filename);
       try {
         const stat = await fs.stat(filePath);
-        if (stat.mtimeMs < lookbackMs) continue;
+        if (stat.mtimeMs < lookbackMs) {
+          continue;
+        }
 
-        const rawLines = await fs.readFile(filePath, "utf-8").then((t) =>
-          t.split("\n").slice(0, FRONTMATTER_SCAN_LINES).join("\n"),
-        );
+        const rawLines = await fs
+          .readFile(filePath, "utf-8")
+          .then((t) => t.split("\n").slice(0, FRONTMATTER_SCAN_LINES).join("\n"));
         const { description, isUserType } = parseUserTypeFrontmatter(rawLines);
-        if (!isUserType) continue;
+        if (!isUserType) {
+          continue;
+        }
 
         // Read a truncated preview for the LLM
         const fullContent = await fs.readFile(filePath, "utf-8");
@@ -162,7 +175,9 @@ async function callCurationLLM(params: {
   agentId: string;
 }): Promise<PromotionEntry[]> {
   const { facts, existingGlobalFiles, cfg, agentId } = params;
-  if (facts.length === 0) return [];
+  if (facts.length === 0) {
+    return [];
+  }
 
   // Group by filename to find cross-workspace candidates
   const byFilename = new Map<string, UserFactFile[]>();
@@ -181,11 +196,13 @@ async function callCurationLLM(params: {
     (group) => new Set(group.map((f) => f.workspaceDir)).size >= minWorkspaces,
   );
 
-  if (candidates.length === 0) return [];
+  if (candidates.length === 0) {
+    return [];
+  }
 
   const manifest = candidates
     .map((group) => {
-      const sample = group[0]!;
+      const sample = group[0];
       return `### [${group.map((f) => f.agentId).join(", ")}] ${sample.filename}\n${sample.contentPreview}`;
     })
     .join("\n\n---\n\n");
@@ -203,7 +220,9 @@ async function callCurationLLM(params: {
     modelRef: resolveSidecarModelRef(cfg),
     allowMissingApiKeyModes: ["aws-sdk"],
   });
-  if ("error" in prepared) return [];
+  if ("error" in prepared) {
+    return [];
+  }
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), LLM_TIMEOUT_MS);
@@ -214,19 +233,25 @@ async function callCurationLLM(params: {
       auth: prepared.auth,
       context: {
         systemPrompt: CURATION_SYSTEM_PROMPT,
-        messages: [{ role: "user", content: userContent }],
+        messages: [{ role: "user", content: userContent, timestamp: Date.now() }],
       },
       options: { maxTokens: 1024, signal: controller.signal },
     });
 
     const text = extractAssistantText(response)?.trim() ?? "";
     const jsonMatch = /\{[\s\S]*\}/.exec(text);
-    if (!jsonMatch) return [];
+    if (!jsonMatch) {
+      return [];
+    }
 
     const parsed: unknown = JSON.parse(jsonMatch[0]);
-    if (!parsed || typeof parsed !== "object") return [];
+    if (!parsed || typeof parsed !== "object") {
+      return [];
+    }
     const promote = (parsed as { promote?: unknown[] }).promote;
-    if (!Array.isArray(promote)) return [];
+    if (!Array.isArray(promote)) {
+      return [];
+    }
 
     return promote
       .filter(
@@ -250,7 +275,9 @@ async function applyPromotions(
   entries: PromotionEntry[],
   globalMemoryDir: string,
 ): Promise<number> {
-  if (entries.length === 0) return 0;
+  if (entries.length === 0) {
+    return 0;
+  }
   const memDir = path.join(globalMemoryDir, "memory");
   await fs.mkdir(memDir, { mode: 0o700, recursive: true });
 
@@ -259,7 +286,7 @@ async function applyPromotions(
     const safeName =
       path
         .basename(entry.filename)
-        .replace(/[^a-zA-Z0-9_\-]/g, "_")
+        .replace(/[^a-zA-Z0-9_-]/g, "_")
         .replace(/\.md$/, "") + ".md";
     try {
       await fs.writeFile(path.join(memDir, safeName), entry.content, {
@@ -276,10 +303,7 @@ async function applyPromotions(
 
 // ── Curation log ──────────────────────────────────────────────────────────────
 
-async function appendCurationLog(
-  globalMemoryDir: string,
-  summary: string,
-): Promise<void> {
+async function appendCurationLog(globalMemoryDir: string, summary: string): Promise<void> {
   const logDir = path.join(globalMemoryDir, ".dreams");
   await fs.mkdir(logDir, { mode: 0o700, recursive: true });
   const logPath = path.join(globalMemoryDir, LOG_RELATIVE_PATH);
@@ -290,10 +314,7 @@ async function appendCurationLog(
 
 // ── Health check ──────────────────────────────────────────────────────────────
 
-async function checkGlobalMemoryHealth(
-  globalMemoryDir: string,
-  logger: Logger,
-): Promise<void> {
+async function checkGlobalMemoryHealth(globalMemoryDir: string, logger: Logger): Promise<void> {
   const memoryMdPath = path.join(globalMemoryDir, "MEMORY.md");
   try {
     const content = await fs.readFile(memoryMdPath, "utf-8");
@@ -332,10 +353,7 @@ async function loadCurationState(globalMemoryDir: string): Promise<CurationState
   return { lastRunMs: 0, totalPromoted: 0 };
 }
 
-async function saveCurationState(
-  globalMemoryDir: string,
-  state: CurationState,
-): Promise<void> {
+async function saveCurationState(globalMemoryDir: string, state: CurationState): Promise<void> {
   const stateDir = path.join(globalMemoryDir, ".dreams");
   await fs.mkdir(stateDir, { mode: 0o700, recursive: true });
   const statePath = path.join(globalMemoryDir, STATE_RELATIVE_PATH);
