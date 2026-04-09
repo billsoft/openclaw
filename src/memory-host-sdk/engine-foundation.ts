@@ -45,3 +45,10 @@ export type {
   MemoryQmdSearchMode,
 } from "../config/types.memory.js";
 export type { MemorySearchConfig } from "../config/types.tools.js";
+export {
+  GLOBAL_MEMORY_SUBDIR,
+  readGlobalMemoryEntrypoint,
+  resolveGlobalMemoryDir,
+  resolveGlobalMemoryEntrypoint,
+} from "../memory-host-sdk/global-memory.js";
+export type { GlobalMemoryReadResult } from "../memory-host-sdk/global-memory.js";
