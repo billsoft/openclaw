@@ -1105,6 +1105,14 @@
         "text",
         "channel"
       ]
+    },
+    "parallel_spawn": {
+      "emoji": "🚀",
+      "title": "Parallel Spawn",
+      "detailKeys": [
+        "tasks",
+        "config"
+      ]
     }
   }
 }

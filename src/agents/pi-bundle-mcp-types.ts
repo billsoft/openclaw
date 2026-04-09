@@ -30,6 +30,95 @@ export type McpToolCatalog = {
   tools: McpCatalogTool[];
 };
 
+// --- Sampling types (MCP spec extension) ---
+
+export type SamplingContentPart =
+  | { type: "text"; text: string }
+  | { type: "image"; data: string; mimeType: string };
+
+export type SamplingCreateMessageParams = {
+  messages: Array<{ role: string; content: string | SamplingContentPart[] }>;
+  maxTokens?: number;
+  modelPreferences?: { hints?: string[] };
+  temperature?: number;
+  stopSequences?: string[];
+  systemPrompt?: string;
+};
+
+export type SamplingMessage = {
+  role: "assistant";
+  content: SamplingContentPart[];
+  model?: string;
+  stopReason?: string | null;
+};
+
+export type McpSamplingCapability = {
+  supported: boolean;
+  serverNames: string[];
+};
+
+// --- Resources types (MCP spec extension) ---
+
+export type McpResource = {
+  uri: string;
+  name?: string;
+  description?: string;
+  mimeType?: string;
+};
+
+export type McpResourceContent = {
+  uri: string;
+  mimeType?: string;
+  blob?: string;
+  text?: string;
+};
+
+export type McpResourceTemplate = {
+  uriTemplate: string;
+  name?: string;
+  description?: string;
+  mimeType?: string;
+};
+
+export type McpResourceCatalog = {
+  version: number;
+  generatedAt: number;
+  resources: McpResource[];
+  templates: McpResourceTemplate[];
+};
+
+// --- Streaming types (MCP spec extension) ---
+
+export type McpProgressNotification = {
+  progress: number;
+  total?: number;
+  message?: string;
+};
+
+export type StreamableContentChunk =
+  | { type: "text"; text: string }
+  | { type: "image"; data: Buffer; mimeType?: string }
+  | { type: "resource"; uri: string; mimeType?: string };
+
+export type StreamingToolCallOptions = {
+  serverName: string;
+  toolName: string;
+  input: unknown;
+  onProgress?: (progress: McpProgressNotification) => void;
+  onContent?: (chunk: StreamableContentChunk) => void;
+  signal?: AbortSignal;
+  timeoutMs?: number;
+};
+
+export type StreamingToolCallResult = {
+  content: Array<{ type: string; text?: string; data?: string; mimeType?: string }>;
+  isError: boolean;
+  progressHistory: McpProgressNotification[];
+  durationMs: number;
+};
+
+// --- Extended SessionMcpRuntime ---
+
 export type SessionMcpRuntime = {
   sessionId: string;
   sessionKey?: string;
@@ -39,7 +128,25 @@ export type SessionMcpRuntime = {
   lastUsedAt: number;
   getCatalog: () => Promise<McpToolCatalog>;
   markUsed: () => void;
+
+  // Core tools
   callTool: (serverName: string, toolName: string, input: unknown) => Promise<CallToolResult>;
+
+  // Sampling (P0)
+  createMessage: (
+    serverName: string,
+    params: SamplingCreateMessageParams,
+  ) => Promise<SamplingMessage>;
+
+  // Resources (P1)
+  listResources: (serverName?: string) => Promise<McpResource[]>;
+  readResource: (uri: string) => Promise<McpResourceContent[]>;
+  listResourceTemplates: () => Promise<McpResourceTemplate[]>;
+  subscribeToResource: (uri: string) => Promise<void>;
+  unsubscribeFromResource: (uri: string) => Promise<void>;
+  getResourceCatalog: () => Promise<McpResourceCatalog>;
+
+  // Cleanup
   dispose: () => Promise<void>;
 };
 

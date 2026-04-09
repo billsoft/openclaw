@@ -1,5 +1,6 @@
 import fs from "node:fs/promises";
 import os from "node:os";
+import path from "node:path";
 import type { AgentMessage } from "@mariozechner/pi-agent-core";
 import {
   createAgentSession,
@@ -58,6 +59,7 @@ import {
 } from "../../channel-tools.js";
 import { DEFAULT_CONTEXT_TOKENS } from "../../defaults.js";
 import { resolveOpenClawDocsPath } from "../../docs-path.js";
+import { extractMemoriesIfNeeded } from "../../extract-memories.js";
 import { isTimeoutError } from "../../failover-error.js";
 import { resolveHeartbeatPromptForSystemPrompt } from "../../heartbeat-system-prompt.js";
 import { resolveImageSanitizationLimits } from "../../image-sanitization.js";
@@ -84,10 +86,12 @@ import { createPreparedEmbeddedPiSettingsManager } from "../../pi-project-settin
 import { applyPiAutoCompactionGuard } from "../../pi-settings.js";
 import { toClientToolDefinitions } from "../../pi-tool-definition-adapter.js";
 import { createOpenClawCodingTools, resolveToolLoopDetectionConfig } from "../../pi-tools.js";
+import { getSharedPromptCacheManager } from "../../prompt-cache-shared.js";
 import { registerProviderStreamForModel } from "../../provider-stream.js";
 import { resolveSandboxContext } from "../../sandbox.js";
 import { resolveSandboxRuntimeStatus } from "../../sandbox/runtime-status.js";
 import { repairSessionFileIfNeeded } from "../../session-file-repair.js";
+import { extractSessionMemoryIfNeeded, getSessionMemoryContent } from "../../session-memory.js";
 import { guardSessionManager } from "../../session-tool-result-guard-wrapper.js";
 import { sanitizeToolUseResultPairing } from "../../session-transcript-repair.js";
 import {
@@ -104,6 +108,8 @@ import { resolveSystemPromptOverride } from "../../system-prompt-override.js";
 import { buildSystemPromptParams } from "../../system-prompt-params.js";
 import { buildSystemPromptReport } from "../../system-prompt-report.js";
 import { sanitizeToolCallIdsForCloudCodeAssist } from "../../tool-call-id.js";
+import { createListMcpResourcesTool } from "../../tools/list-mcp-resources-tool.js";
+import { createReadMcpResourceTool } from "../../tools/read-mcp-resource-tool.js";
 import { resolveTranscriptPolicy } from "../../transcript-policy.js";
 import { normalizeUsage, type NormalizedUsage, type UsageLike } from "../../usage.js";
 import { DEFAULT_BOOTSTRAP_FILENAME } from "../../workspace.js";
@@ -560,6 +566,26 @@ export async function runEmbeddedAttempt(
           ],
         })
       : undefined;
+
+    // MCP resources tools - require bundleMcpSessionRuntime
+    const mcpResourcesTools = bundleMcpSessionRuntime
+      ? [
+          createListMcpResourcesTool(() =>
+            Promise.resolve({
+              listResources: (serverName?: string) =>
+                bundleMcpSessionRuntime.listResources(serverName),
+            }),
+          ),
+          createReadMcpResourceTool(() =>
+            Promise.resolve({
+              readResource: (uri: string) => bundleMcpSessionRuntime.readResource(uri),
+            }),
+          ),
+        ]
+      : [];
+
+    const mcpResourceToolNames = mcpResourcesTools.map((t) => t.name);
+
     const bundleLspRuntime = toolsEnabled
       ? await createBundleLspToolRuntime({
           workspaceDir: effectiveWorkspace,
@@ -568,12 +594,15 @@ export async function runEmbeddedAttempt(
             ...tools.map((tool) => tool.name),
             ...(clientTools?.map((tool) => tool.function.name) ?? []),
             ...(bundleMcpRuntime?.tools.map((tool) => tool.name) ?? []),
+            ...mcpResourceToolNames,
           ],
         })
       : undefined;
+
     const effectiveTools = [
       ...tools,
       ...(bundleMcpRuntime?.tools ?? []),
+      ...mcpResourcesTools,
       ...(bundleLspRuntime?.tools ?? []),
     ];
     const allowedToolNames = collectAllowedToolNames({
@@ -766,6 +795,11 @@ export async function runEmbeddedAttempt(
         contextFiles,
         includeMemorySection: !params.contextEngine || params.contextEngine.info.id === "legacy",
         memoryCitationsMode: params.config?.memory?.citations,
+        sessionMemoryContent:
+          (await getSessionMemoryContent(
+            params.agentDir ?? resolveOpenClawAgentDir(),
+            params.sessionId,
+          ).catch(() => undefined)) ?? undefined,
         promptContribution,
       });
     const systemPromptReport = buildSystemPromptReport({
@@ -1680,6 +1714,20 @@ export async function runEmbeddedAttempt(
           activeSession.agent.streamFn = googlePromptCacheStreamFn;
         }
 
+        try {
+          const sharedCacheManager = getSharedPromptCacheManager();
+          const cacheEntry = await sharedCacheManager.getOrCreate({
+            provider: params.provider,
+            modelId: params.modelId,
+            systemPrompt: systemPromptText,
+            toolNames: promptCacheToolNames,
+            retention: effectivePromptCacheRetention,
+          });
+          sharedCacheManager.acquire(params.sessionId, cacheEntry);
+        } catch {
+          log.debug(`shared-prompt-cache: warmup skipped for session ${params.sessionId}`);
+        }
+
         log.debug(`embedded run prompt start: runId=${params.runId} sessionId=${params.sessionId}`);
         cacheTrace?.recordStage("prompt:before", {
           prompt: effectivePrompt,
@@ -2033,6 +2081,23 @@ export async function runEmbeddedAttempt(
               usage: attemptUsage,
             })
           : null;
+
+        try {
+          const sharedCacheManager = getSharedPromptCacheManager();
+          sharedCacheManager.invalidateBySession(params.sessionId);
+        } catch {
+          // best-effort cleanup
+        }
+
+        extractSessionMemoryIfNeeded({
+          baseDir: params.agentDir ?? resolveOpenClawAgentDir(),
+          sessionId: params.sessionId,
+          messages: messagesSnapshot as unknown as Array<Record<string, unknown>>,
+          currentTokenCount: messagesSnapshot.length * 200,
+          hasToolCallsInLastTurn: toolMetas.length > 0,
+        }).catch((err) => {
+          log.debug(`session-memory: post-turn extraction skipped: ${String(err)}`);
+        });
         const lastCallUsage = normalizeUsage(
           (currentAttemptAssistant as { usage?: UsageLike } | undefined)?.usage,
         );
@@ -2168,6 +2233,27 @@ export async function runEmbeddedAttempt(
             .catch((err) => {
               log.warn(`agent_end hook failed: ${err}`);
             });
+        }
+
+        const agentIdsResult = resolveSessionAgentIds({
+          sessionKey: params.sessionKey,
+          config: params.config,
+        });
+        const agentIdList = [agentIdsResult.defaultAgentId, agentIdsResult.sessionAgentId];
+        for (const aid of agentIdList) {
+          extractMemoriesIfNeeded({
+            agentId: aid,
+            currentTurnIndex: messagesSnapshot.length,
+            config: {
+              enabled: true,
+              minTurnsBetweenExtractions: 1,
+              maxTurnsPerExtraction: 5,
+              memoryDir: path.join(params.agentDir ?? resolveOpenClawAgentDir(), aid, "memory"),
+            },
+            recentMessages: messagesSnapshot as unknown as Array<Record<string, unknown>>,
+          }).catch((err) => {
+            log.debug(`extract-memories: skipped for ${aid}: ${String(err)}`);
+          });
         }
       } finally {
         clearTimeout(abortTimer);

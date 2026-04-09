@@ -362,6 +362,8 @@ export function buildAgentSystemPrompt(params: {
   /** Whether to include the active memory plugin prompt guidance in the base system prompt. Defaults to true. */
   includeMemorySection?: boolean;
   memoryCitationsMode?: MemoryCitationsMode;
+  /** Session memory notes content (from session-memory/notes.md). Injected as ## Session Memory section if non-empty. */
+  sessionMemoryContent?: string;
   promptContribution?: ProviderSystemPromptContribution;
 }) {
   const acpEnabled = params.acpEnabled !== false;
@@ -573,6 +575,15 @@ export function buildAgentSystemPrompt(params: {
     "",
     ...skillsSection,
     ...memorySection,
+    ...(params.sessionMemoryContent?.trim()
+      ? [
+          "## Session Memory",
+          "Below is the rolling session memory notes, auto-updated during conversation. Use it as context for continuity.",
+          "",
+          params.sessionMemoryContent.trim(),
+          "",
+        ]
+      : []),
     // Skip self-update for subagent/none modes
     hasGateway && !isMinimal ? "## OpenClaw Self-Update" : "",
     hasGateway && !isMinimal

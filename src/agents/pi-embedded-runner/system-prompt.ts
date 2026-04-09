@@ -53,6 +53,7 @@ export function buildEmbeddedSystemPrompt(params: {
   contextFiles?: EmbeddedContextFile[];
   includeMemorySection?: boolean;
   memoryCitationsMode?: MemoryCitationsMode;
+  sessionMemoryContent?: string;
   promptContribution?: ProviderSystemPromptContribution;
 }): string {
   return buildAgentSystemPrompt({
@@ -83,6 +84,7 @@ export function buildEmbeddedSystemPrompt(params: {
     contextFiles: params.contextFiles,
     includeMemorySection: params.includeMemorySection,
     memoryCitationsMode: params.memoryCitationsMode,
+    sessionMemoryContent: params.sessionMemoryContent,
     promptContribution: params.promptContribution,
   });
 }

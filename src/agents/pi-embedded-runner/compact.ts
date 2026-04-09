@@ -80,6 +80,7 @@ import { registerProviderStreamForModel } from "../provider-stream.js";
 import { ensureRuntimePluginsLoaded } from "../runtime-plugins.js";
 import { resolveSandboxContext } from "../sandbox.js";
 import { repairSessionFileIfNeeded } from "../session-file-repair.js";
+import { trySessionMemoryCompaction } from "../session-memory.js";
 import { guardSessionManager } from "../session-tool-result-guard-wrapper.js";
 import { sanitizeToolUseResultPairing } from "../session-transcript-repair.js";
 import {
@@ -1017,6 +1018,34 @@ export async function compactEmbeddedPiSessionDirect(
             // If token estimation throws on a malformed message, fall back to 0 so
             // the sanity check below becomes a no-op instead of crashing compaction.
           }
+
+          const smCompactResult = await trySessionMemoryCompaction(
+            params.agentDir ?? resolveOpenClawAgentDir(),
+            params.sessionId,
+            session.messages as Array<{ uuid?: string }>,
+          );
+
+          if (smCompactResult && smCompactResult.wasSmCompact) {
+            log.info(
+              `[compaction] SM-Compact succeeded for sessionKey=${params.sessionKey ?? params.sessionId} ` +
+                `trigger=session-memory`,
+            );
+            return {
+              ok: true,
+              compacted: true,
+              reason: "session-memory-compact",
+              result: {
+                summary: "session-memory-compact",
+                firstKeptEntryId: smCompactResult.boundaryMarker
+                  ? (((smCompactResult.boundaryMarker as Record<string, unknown>).uuid as string) ??
+                    "")
+                  : "",
+                tokensBefore: fullSessionTokensBefore || messageCountCompactionInput * 50,
+                tokensAfter: smCompactResult.postCompactTokenCount ?? 0,
+              },
+            };
+          }
+
           const activeSession = session;
           const result = await compactWithSafetyTimeout(
             () => {

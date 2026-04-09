@@ -60,6 +60,21 @@ describe("session MCP runtime", () => {
           content: [{ type: "text", text: String(toolName) }],
           isError: false,
         }),
+        createMessage: async (_serverName, _params) => ({
+          role: "assistant" as const,
+          content: [],
+        }),
+        listResources: async () => [],
+        readResource: async (_uri) => [],
+        listResourceTemplates: async () => [],
+        subscribeToResource: async (_uri) => {},
+        unsubscribeFromResource: async (_uri) => {},
+        getResourceCatalog: async () => ({
+          version: 1,
+          generatedAt: Date.now(),
+          resources: [],
+          templates: [],
+        }),
         dispose: async () => {},
       };
     }

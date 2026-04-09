@@ -10,12 +10,24 @@ import { redactSensitiveUrlLikeString } from "../shared/net/redact-sensitive-url
 import { normalizeOptionalString } from "../shared/string-coerce.js";
 import { loadEmbeddedPiMcpConfig } from "./embedded-pi-mcp.js";
 import { isMcpConfigRecord } from "./mcp-config-shared.js";
+import {
+  buildResourceCatalog,
+  listAllResourceTemplates,
+  listAllResources,
+  readResourceFromSessions,
+  subscribeToResourceOnSessions,
+  unsubscribeFromResourceOnSessions,
+} from "./mcp-resources.js";
+import { createSamplingMessage as doCreateSamplingMessage } from "./mcp-sampling.js";
 import { resolveMcpTransport } from "./mcp-transport.js";
 import { sanitizeServerName } from "./pi-bundle-mcp-names.js";
 import type {
   McpCatalogTool,
+  McpResourceCatalog,
   McpServerCatalog,
   McpToolCatalog,
+  SamplingCreateMessageParams,
+  SamplingMessage,
   SessionMcpRuntime,
   SessionMcpRuntimeManager,
 } from "./pi-bundle-mcp-types.js";
@@ -274,6 +286,59 @@ export function createSessionMcpRuntime(params: {
         name: toolName,
         arguments: isMcpConfigRecord(input) ? input : {},
       })) as CallToolResult;
+    },
+
+    // --- Sampling (P0) ---
+
+    async createMessage(
+      serverName: string,
+      params: SamplingCreateMessageParams,
+    ): Promise<SamplingMessage> {
+      failIfDisposed();
+      await getCatalog();
+      const session = sessions.get(serverName);
+      if (!session) {
+        throw new Error(`bundle-mcp server "${serverName}" is not connected`);
+      }
+      return doCreateSamplingMessage(session.client, serverName, params);
+    },
+
+    // --- Resources (P1) ---
+
+    async listResources(serverName?: string) {
+      failIfDisposed();
+      await getCatalog();
+      return listAllResources(sessions, serverName);
+    },
+
+    async readResource(uri: string) {
+      failIfDisposed();
+      await getCatalog();
+      return readResourceFromSessions(sessions, uri);
+    },
+
+    async listResourceTemplates() {
+      failIfDisposed();
+      await getCatalog();
+      return listAllResourceTemplates(sessions);
+    },
+
+    async subscribeToResource(uri: string) {
+      failIfDisposed();
+      await getCatalog();
+      return subscribeToResourceOnSessions(sessions, uri);
+    },
+
+    async unsubscribeFromResource(uri: string) {
+      failIfDisposed();
+      await getCatalog();
+      return unsubscribeFromResourceOnSessions(sessions, uri);
+    },
+
+    async getResourceCatalog(): Promise<McpResourceCatalog> {
+      failIfDisposed();
+      await getCatalog();
+      return buildResourceCatalog(sessions);
     },
     async dispose() {
       if (disposed) {
