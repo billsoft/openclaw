@@ -151,5 +151,5 @@ analysis/
 .artifacts/qa-e2e/
 extensions/qa-lab/web/dist/
 
-# # claude code
-# claude-code/*
+# claude code
+claude-code/*
