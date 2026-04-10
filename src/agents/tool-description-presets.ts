@@ -36,7 +36,9 @@ export function describeSessionsSpawnTool(): string {
     'Spawn an isolated session with `runtime="subagent"` or `runtime="acp"`.',
     '`mode="run"` is one-shot and `mode="session"` is persistent or thread-bound.',
     "Subagents inherit the parent workspace directory automatically.",
-    "Use this when the work should happen in a fresh child session instead of the current one.",
+    "This tool is FULLY ASYNCHRONOUS (fire-and-forget). It returns `accepted` immediately, freeing you to reply to the user or spawn more workers in parallel.",
+    "Results will automatically be delivered back to you as internal system events (`[Internal task completion event]`) when the worker finishes.",
+    "Use this for all substantive delegation and multi-agent orchestration.",
   ].join(" ");
 }
 

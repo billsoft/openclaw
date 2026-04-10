@@ -624,6 +624,8 @@ export async function spawnSubagentDirect(
       "This directory is shared with sibling workers spawned by the same coordinator.",
       "Use it to exchange intermediate results, findings, or data with other workers.",
       "You can read and write files here without permission prompts.",
+      `Always write your own outputs to a unique worker-specific file such as ${ctx.scratchpadDir}/worker-${targetAgentId}-results.md or a unique subdirectory under that path.`,
+      "Do not overwrite files created by sibling workers. You may read them, but write only to your own worker-specific files unless your task explicitly says to aggregate results.",
       "",
     ].join("\n");
     childSystemPrompt += scratchpadHint;
