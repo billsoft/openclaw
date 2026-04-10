@@ -1,29 +1,19 @@
-#!/bin/bash
+#!/bin/zsh
 # Deploy OpenClaw to local production environment
 # Usage: ./scripts/deploy-local.sh [port]
 
 set -e
 
+# Load nvm for pnpm if available
+export NVM_DIR="$HOME/.nvm"
+[ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
+
 PORT=${1:-18789}
 OPENCLAW_DIR="/Volumes/D 1/code/openclaw"
 GATEWAY_PID_FILE="/tmp/openclaw-gateway.pid"
 
-# Find node and pnpm (try common locations)
-if command -v node &> /dev/null; then
-    NODE_CMD="node"
-elif [ -f "/usr/local/bin/node" ]; then
-    NODE_CMD="/usr/local/bin/node"
-else
-    NODE_CMD="/usr/bin/env node"
-fi
-
-if command -v pnpm &> /dev/null; then
-    PNPM="pnpm"
-elif [ -f "$OPENCLAW_DIR/node_modules/.bin/pnpm" ]; then
-    PNPM="$OPENCLAW_DIR/node_modules/.bin/pnpm"
-else
-    PNPM="/usr/local/bin/pnpm"
-fi
+# Find node - use nvm path directly to avoid shell function issues
+NODE_CMD="$HOME/.nvm/versions/node/v22.22.0/bin/node"
 
 echo "=== OpenClaw Local Deploy ==="
 
@@ -53,7 +43,7 @@ git pull origin main
 
 # 3. Build
 echo "[3/4] Building..."
-$PNPM build
+cd "$OPENCLAW_DIR" && pnpm build
 
 # 4. Start gateway
 echo "[4/4] Starting gateway on port $PORT..."
@@ -61,7 +51,15 @@ cd "$OPENCLAW_DIR"
 $NODE_CMD dist/index.js gateway run --bind loopback --port $PORT &
 GATEWAY_PID=$!
 echo $GATEWAY_PID > "$GATEWAY_PID_FILE"
-sleep 5
+
+# Wait for gateway to start (may need time for UI build)
+echo "  Waiting for gateway to start..."
+for i in {1..30}; do
+    if lsof -i :$PORT | grep -q LISTEN; then
+        break
+    fi
+    sleep 1
+done
 
 # Verify
 if lsof -i :$PORT | grep -q LISTEN; then
