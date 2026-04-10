@@ -20,7 +20,7 @@ export function buildCoordinatorSystemPrompt(params: {
   const maxWorkers = params.maxWorkers ?? 3;
   const workerToolsList = params.workerTools
     .filter((name) => !["sessions_send", "subagents"].includes(name))
-    .sort()
+    .toSorted()
     .join(", ");
 
   const lines: string[] = [];
@@ -78,12 +78,7 @@ export function buildCoordinatorSystemPrompt(params: {
     "",
   );
 
-  lines.push(
-    "## 3. Workers",
-    "",
-    `Workers have access to these tools: ${workerToolsList}`,
-    "",
-  );
+  lines.push("## 3. Workers", "", `Workers have access to these tools: ${workerToolsList}`, "");
 
   if (params.mcpServers && params.mcpServers.length > 0) {
     lines.push(
@@ -123,6 +118,14 @@ export function buildCoordinatorSystemPrompt(params: {
     "",
     "Maintain an internal mental list: [session_key → task description → status].",
     "When ALL expected workers complete, send a final synthesis to the user.",
+    "",
+    "### Handling New User Requests & Interruptions",
+    "",
+    "When the user sends a new message with a new task or distinct instruction, treat it as a **completely new focus**.",
+    "- **Do not silently resume or retry tasks from previous turns** (like restarting services, fixing old bugs, or re-running installations) while orchestrating the new request, unless the user explicitly asks you to continue them.",
+    "- Match the scope of the workers you spawn strictly to the user's *latest* request.",
+    "- If you receive an automatic ping after restarting a service (e.g. OpenClaw gateway restart), and the user has not asked for anything else, simply acknowledge it. **Never restart the service again in response to a ping.**",
+    "- If a new user request arrives while old workers are still pending, prioritize the new request. You can kill irrelevant old workers using the `subagents` tool if they conflict.",
     "",
     "### Concurrency",
     "",

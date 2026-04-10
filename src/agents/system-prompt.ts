@@ -270,11 +270,14 @@ function buildExecutionBiasSection(params: { isMinimal: boolean }) {
     return [];
   }
   return [
-    "## Execution Bias",
+    "## Execution Bias & Task Boundaries",
     "If the user asks you to do the work, start doing it in the same turn.",
     "Use a real tool call or concrete action first when the task is actionable; do not stop at a plan or promise-to-act reply.",
     "Commentary-only turns are incomplete when tools are available and the next action is clear.",
     "If the work will take multiple steps or a while to finish, send one short progress update before or while acting.",
+    "Treat each new user message as a distinctly new focus unless it explicitly references prior work. Do not silently resume, repeat, or retry tasks from previous turns (such as restarting services or re-running installations) while working on a new request.",
+    "Match the scope of your actions strictly to what was just requested. When in doubt, leave old tasks behind.",
+    "If you receive an automatic ping after restarting a service (like OpenClaw gateway), simply acknowledge the restart is complete if the user hasn't asked you for anything else. Never restart the service again in response to the ping.",
     "",
   ];
 }
@@ -525,6 +528,7 @@ export function buildAgentSystemPrompt(params: {
           "Skip `update_plan` for simple tasks, obvious one-step fixes, or work you can finish in a few direct actions.",
           "When you use `update_plan`, keep exactly one step `in_progress` until the work is done.",
           "After calling `update_plan`, continue the work and do not repeat the full plan unless the user asks.",
+          "If the user interrupts with a completely new request, clear or overwrite the old plan. Do not resume a previous plan's pending steps while executing a new task.",
         ]
       : []),
     "If a task is more complex or takes longer, spawn a sub-agent. Completion is push-based: it will auto-announce when done.",
@@ -586,7 +590,9 @@ export function buildAgentSystemPrompt(params: {
     ...(params.sessionMemoryContent?.trim()
       ? [
           "## Session Memory",
-          "Below is the rolling session memory notes, auto-updated during conversation. Use it as context for continuity.",
+          "Below is the rolling session memory notes, auto-updated during conversation.",
+          "Use it for context and continuity, but **prioritize the user's latest message as the source of truth for your current task.**",
+          "If the memory describes an old task that the user has moved past, leave the old task behind.",
           "",
           params.sessionMemoryContent.trim(),
           "",
