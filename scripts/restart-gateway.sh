@@ -1,7 +1,9 @@
 #!/bin/zsh
 # Restart OpenClaw Gateway (for updates)
-# Assumes service is already installed via: openclaw gateway install --port 18789
 # Usage: ./scripts/restart-gateway.sh [port]
+#
+# This script pulls latest code, rebuilds, and restarts the gateway service.
+# Note: The service must be installed first via 'openclaw gateway install --port <port>'
 
 set -e
 
@@ -9,31 +11,29 @@ PORT=${1:-18789}
 
 echo "=== OpenClaw Gateway Restart ==="
 
-# 1. Stop service
-echo "[1/3] Stopping gateway service..."
-openclaw gateway stop 2>/dev/null || true
-
-# 2. Pull latest code
-echo "[2/3] Pulling latest from origin/main..."
+# 1. Pull latest code
+echo "[1/4] Pulling latest from origin/main..."
 cd "/Volumes/D 1/code/openclaw"
 git pull origin main
 
-# 3. Build
-echo "[3/3] Building..."
+# 2. Build
+echo "[2/4] Building..."
 pnpm build && pnpm ui:build
 
-# 4. Start service
-echo "Starting gateway service..."
-openclaw gateway start
+# 3. Restart service using official restart command
+echo "[3/4] Restarting gateway service..."
+openclaw gateway restart --port $PORT
 
-# Wait for startup
-sleep 5
+# 4. Wait for startup
+echo "[4/4] Waiting for gateway to be ready..."
+sleep 30
 
 # Verify
-if curl -s -o /dev/null -w "%{http_code}" http://localhost:$PORT/ | grep -q "200"; then
+STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:$PORT/ 2>/dev/null || echo "000")
+if [ "$STATUS" = "200" ]; then
     echo "=== Restart Complete ==="
     echo "Gateway running on http://localhost:$PORT/"
 else
-    echo "=== Warning: Gateway may not be ready yet ==="
+    echo "=== Warning: Gateway may not be ready yet (HTTP $STATUS) ==="
     echo "Check status with: openclaw gateway status"
 fi

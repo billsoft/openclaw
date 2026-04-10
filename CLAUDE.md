@@ -94,3 +94,18 @@ Use `scripts/committer "<msg>" <file...>` (not manual `git add`/`git commit`). C
 ## Docs (Mintlify)
 
 Internal doc links: root-relative, no `.md` extension (e.g., `[Config](/configuration)`). Anchors on root-relative paths (e.g., `[Hooks](/configuration#hooks)`). README uses absolute `https://docs.openclaw.ai/...` URLs.
+
+## 本地生产环境部署经验（踩坑记录）
+
+### plist 必须用官方命令创建
+手动写 `~/Library/LaunchAgents/ai.openclaw.gateway.plist` 容易出错（如用了 `/opt/homebrew/opt/node/bin/node` 而非 nvm 路径）。正确做法：
+
+```bash
+openclaw gateway install --port 18789
+```
+
+### restart 机制
+官方 `openclaw gateway restart` 通过 `launchctl kickstart -k` 重启服务。内部重启（有 handoff 机制）会生成 detached shell script 避免进程在 restart 完成前被终止。
+
+### 启动延迟不是失败
+Gateway 启动后需要 20-30 秒才能响应 HTTP 请求（飞书等通道建立 WebSocket 连接占用时间）。日志显示 `ready` 后不代表立即可用，这是正常现象。

@@ -65,47 +65,45 @@ openclaw gateway status
 
 ## 代码更新流程
 
-### 方式一：使用脚本（推荐）
+### 使用官方 restart 命令（推荐）
+
+官方 `openclaw gateway restart` 会自动处理服务重启：
 
 ```bash
-# 简化版 - 自动完成停止、编译、重启
+cd /Volumes/D\ 1/code/openclaw
+
+# 1. 拉取最新代码
+git pull origin main
+
+# 2. 编译
+pnpm build && pnpm ui:build
+
+# 3. 重启服务（自动处理 SIGUSR1 / launchctl）
+openclaw gateway restart --port 18789
+```
+
+### 使用脚本（简化版）
+
+```bash
 cd /Volumes/D\ 1/code/openclaw
 zsh scripts/restart-gateway.sh
 ```
 
-### 方式二：使用完整部署脚本
+脚本内容：
 
 ```bash
-cd /Volumes/D\ 1/code/openclaw
+#!/bin/zsh
+set -e
+PORT=${1:-18789}
 
-# 停止服务
-openclaw gateway stop
-
-# 拉取并编译最新代码
+# 1. 拉取最新代码
 git pull origin main
+
+# 2. 编译
 pnpm build && pnpm ui:build
 
-# 启动服务
-openclaw gateway start
-```
-
-### 方式二：分步操作
-
-```bash
-# 1. 停止服务
-openclaw gateway stop
-
-# 2. 拉取最新代码
-git pull origin main
-
-# 3. 编译（自动包含 UI 构建）
-pnpm build
-
-# 4. 如果 UI 有更新，手动构建 UI
-pnpm ui:build
-
-# 5. 启动服务
-openclaw gateway start
+# 3. 重启服务
+openclaw gateway restart --port $PORT
 ```
 
 ## 验证部署
@@ -163,6 +161,15 @@ lsof -ti :18789 | xargs kill -9
 - **工作目录**：`/Volumes/D 1/code/openclaw`
 - **入口文件**：`dist/index.js gateway --port 18789`
 - **日志文件**：`~/.openclaw/logs/gateway.log`
+
+### Restart 机制说明
+
+`openclaw gateway restart` 命令通过 launchd 重启服务：
+
+1. **外部重启**（从终端手动执行）：直接调用 `launchctl kickstart -k <service-target>`
+2. **内部重启**（OpenClaw 自身触发）：使用 detached handoff 机制避免进程在重启完成前被终止
+
+重启后 launchd 自动使用更新后的 `dist/index.js`，无需重新 install。
 
 ## 环境变量
 
