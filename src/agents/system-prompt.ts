@@ -590,9 +590,8 @@ export function buildAgentSystemPrompt(params: {
     ...(params.sessionMemoryContent?.trim()
       ? [
           "## Session Memory",
-          "Below is the rolling session memory notes, auto-updated during conversation.",
-          "Use it for context and continuity, but **prioritize the user's latest message as the source of truth for your current task.**",
-          "If the memory describes an old task that the user has moved past, leave the old task behind.",
+          "**Priority rule: the user's latest message is always the source of truth for your current task. Session Memory is supporting context only — not a directive.**",
+          "If the memory references a task the user has already moved past, disregard it and focus on the new request.",
           "",
           params.sessionMemoryContent.trim(),
           "",

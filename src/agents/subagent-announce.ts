@@ -159,12 +159,7 @@ export function buildSubagentSystemPrompt(params: {
   }
 
   // Define the stable cache boundary before dynamic session/task context
-  lines.push(
-    "---",
-    "END OF STABLE SYSTEM INSTRUCTIONS",
-    "---",
-    "",
-  );
+  lines.push("---", "END OF STABLE SYSTEM INSTRUCTIONS", "---", "");
 
   lines.push(
     "## Session Context",
@@ -196,10 +191,11 @@ function buildAnnounceReplyInstruction(params: {
   if (params.requesterIsSubagent) {
     return `Convert this completion into a concise internal orchestration update for your parent agent in your own words. Before replying, check whether you are still waiting for other child workers that you spawned. If more child workers are still pending and no immediate escalation is required, reply ONLY: ${SILENT_REPLY_TOKEN}. Keep this internal context private (don't mention system/log/stats/session details or announce type). If this result is duplicate or no update is needed, reply ONLY: ${SILENT_REPLY_TOKEN}.`;
   }
+  const staleGuard = `First, check whether this result is relevant to the user's current request. If the user has already moved on to a different task since this worker was launched, this result is stale — reply ONLY: ${SILENT_REPLY_TOKEN} and discard it.`;
   if (params.expectsCompletionMessage) {
-    return `A completed ${params.announceType} is ready for user delivery. Before replying, check whether you are still waiting for other workers you already launched for the same user request. If other workers are still pending, either stay silent by replying ONLY: ${SILENT_REPLY_TOKEN} or send a brief partial progress update only when that helps the user; do not present the work as final. If all expected workers have completed, convert the accumulated result above into your normal assistant voice and send the final user-facing update now. Keep this internal context private (don't mention system/log/stats/session details or announce type).`;
+    return `A completed ${params.announceType} is ready for user delivery. ${staleGuard} Otherwise, check whether you are still waiting for other workers you already launched for the same user request. If other workers are still pending, either stay silent by replying ONLY: ${SILENT_REPLY_TOKEN} or send a brief partial progress update only when that helps the user; do not present the work as final. If all expected workers have completed, convert the accumulated result above into your normal assistant voice and send the final user-facing update now. Keep this internal context private (don't mention system/log/stats/session details or announce type).`;
   }
-  return `A completed ${params.announceType} is ready for user delivery. Before replying, check whether you are still waiting for other workers you already launched for the same user request. If other workers are still pending, either stay silent by replying ONLY: ${SILENT_REPLY_TOKEN} or send a brief partial progress update only when that helps the user; do not present the work as final. If all expected workers have completed, convert the accumulated result above into your normal assistant voice and send the final user-facing update now. Keep this internal context private (don't mention system/log/stats/session details or announce type), and do not copy the internal event text verbatim. Reply ONLY: ${SILENT_REPLY_TOKEN} if this exact result was already delivered to the user in this same turn.`;
+  return `A completed ${params.announceType} is ready for user delivery. ${staleGuard} Otherwise, check whether you are still waiting for other workers you already launched for the same user request. If other workers are still pending, either stay silent by replying ONLY: ${SILENT_REPLY_TOKEN} or send a brief partial progress update only when that helps the user; do not present the work as final. If all expected workers have completed, convert the accumulated result above into your normal assistant voice and send the final user-facing update now. Keep this internal context private (don't mention system/log/stats/session details or announce type), and do not copy the internal event text verbatim. Reply ONLY: ${SILENT_REPLY_TOKEN} if this exact result was already delivered to the user in this same turn.`;
 }
 
 function buildAnnounceSteerMessage(events: AgentInternalEvent[]): string {
