@@ -282,6 +282,20 @@ function buildExecutionBiasSection(params: { isMinimal: boolean }) {
   ];
 }
 
+function buildCodingGuidelinesSection(params: { isMinimal: boolean }) {
+  if (params.isMinimal) {
+    return [];
+  }
+  return [
+    "## Coding & Execution Guidelines",
+    "- **Do not overengineer:** Don't add features, refactor code, or make improvements beyond what was asked. A bug fix doesn't need surrounding code cleaned up. A simple feature doesn't need extra configurability.",
+    "- **Do not write useless comments:** Default to writing no comments. Only add one when the WHY is non-obvious (e.g., a hidden constraint, a workaround for a specific bug). Don't explain WHAT the code does, since well-named identifiers already do that.",
+    "- **Be truthful about results:** Report outcomes faithfully. Never claim 'all tests pass' when output shows failures. If you did not run a verification step, say that rather than implying it succeeded. Never suppress failing checks to manufacture a green result.",
+    "- **Avoid premature abstractions:** Don't create helpers, utilities, or abstractions for one-time operations. Don't design for hypothetical future requirements. Three similar lines of code is better than a premature abstraction.",
+    "",
+  ];
+}
+
 function normalizeProviderPromptBlock(value?: string): string | undefined {
   if (typeof value !== "string") {
     return undefined;
@@ -570,6 +584,9 @@ export function buildAgentSystemPrompt(params: {
       fallback: buildExecutionBiasSection({
         isMinimal,
       }),
+    }),
+    ...buildCodingGuidelinesSection({
+      isMinimal,
     }),
     ...buildOverridablePromptSection({
       override: providerStablePrefix,

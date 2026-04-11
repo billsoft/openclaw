@@ -12,15 +12,17 @@
  */
 export const DEFAULT_COMPACTION_INSTRUCTIONS =
   "Write the summary body in the primary language used in the conversation.\n" +
+  "CRITICAL: Respond with TEXT ONLY. Do NOT call any tools (Read, Bash, etc.). Tool calls will be REJECTED and waste the turn.\n" +
+  "Before providing the final summary, wrap your analysis in <analysis> tags to organize your thoughts and chronologically analyze the events, decisions, errors, and fixes.\n" +
   "Focus on factual content: what was discussed, decisions made, and current state.\n" +
-  "Keep the required summary structure and section headers unchanged.\n" +
-  "Do not translate or alter code, file paths, identifiers, or error messages.";
+  "Keep the required summary structure and section headers unchanged. Do not translate or alter code, file paths, identifiers, or error messages.\n" +
+  "Optional Next Step: Include direct quotes from the most recent conversation showing EXACTLY what task you were working on. This MUST be verbatim to ensure no drift in task interpretation.";
 
 /**
  * Upper bound on custom instruction length to prevent prompt bloat.
- * ~800 chars ≈ ~200 tokens — keeps summarization quality stable.
+ * Increased to ~2500 chars to accommodate strict extraction guidelines.
  */
-const MAX_INSTRUCTION_LENGTH = 800;
+const MAX_INSTRUCTION_LENGTH = 2500;
 
 function truncateUnicodeSafe(s: string, maxCodePoints: number): string {
   const chars = Array.from(s);

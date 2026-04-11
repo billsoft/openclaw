@@ -22,6 +22,9 @@ export const SAFETY_MARGIN = 1.2; // 20% buffer for estimateTokens() inaccuracy
 const DEFAULT_SUMMARY_FALLBACK = "No prior history.";
 const DEFAULT_PARTS = 2;
 const MERGE_SUMMARIES_INSTRUCTIONS = [
+  "CRITICAL: Respond with TEXT ONLY. Do NOT call any tools. Tool calls will be REJECTED and waste the turn.",
+  "Before providing your final summary, wrap your analysis in <analysis> tags to organize your thoughts and ensure you've covered all necessary points.",
+  "",
   "Merge these partial summaries into a single cohesive summary.",
   "",
   "MUST PRESERVE:",
@@ -34,8 +37,12 @@ const MERGE_SUMMARIES_INSTRUCTIONS = [
   "",
   "PRIORITIZE recent context over older history. The agent needs to know",
   "what it was doing, not just what was discussed.",
+  "",
+  "Optional Next Step: List the next step that you will take that is related to the most recent work you were doing. IMPORTANT: ensure that this step is DIRECTLY in line with the user's most recent explicit requests. Include direct quotes from the most recent conversation showing exactly what task you were working on. This MUST be verbatim to ensure there's no drift in task interpretation.",
 ].join("\n");
 const IDENTIFIER_PRESERVATION_INSTRUCTIONS =
+  "CRITICAL: Respond with TEXT ONLY. Do NOT call any tools. Tool calls will be REJECTED and waste the turn.\n" +
+  "Before providing your final summary, wrap your analysis in <analysis> tags to organize your thoughts and chronologically analyze the events, decisions, errors, and fixes.\n" +
   "Preserve all opaque identifiers exactly as written (no shortening or reconstruction), " +
   "including UUIDs, hashes, IDs, tokens, API keys, hostnames, IPs, ports, URLs, and file names.";
 
