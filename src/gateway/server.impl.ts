@@ -624,7 +624,7 @@ export async function startGatewayServer(
 
     const canvasHostServerPort = (canvasHostServer as CanvasHostServer | null)?.port;
 
-    const unavailableGatewayMethods = new Set<string>(minimalTestGateway ? [] : ["chat.history"]);
+    const unavailableGatewayMethods = new Set<string>(minimalTestGateway ? [] : []);
     const gatewayRequestContext = createGatewayRequestContext({
       deps,
       runtimeState,
