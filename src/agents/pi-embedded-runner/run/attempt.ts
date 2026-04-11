@@ -30,7 +30,7 @@ import { isSubagentSessionKey } from "../../../routing/session-key.js";
 import { normalizeOptionalLowercaseString } from "../../../shared/string-coerce.js";
 import { normalizeOptionalString } from "../../../shared/string-coerce.js";
 import { buildTtsSystemPromptHint } from "../../../tts/tts.js";
-import { resolveUserPath } from "../../../utils.js";
+import { CONFIG_DIR, resolveUserPath } from "../../../utils.js";
 import { normalizeMessageChannel } from "../../../utils/message-channel.js";
 import { isReasoningTagProvider } from "../../../utils/provider-utils.js";
 import { resolveOpenClawAgentDir } from "../../agent-paths.js";
@@ -228,6 +228,11 @@ import {
   selectCompactionTimeoutSnapshot,
   shouldFlagCompactionTimeout,
 } from "./compaction-timeout.js";
+import {
+  getSystemPromptAddendum,
+  onAgentReply as autoEvolveOnAgentReply,
+  onUserMessage as autoEvolveOnUserMessage,
+} from "../../skills/auto-evolve/index.js";
 import { pruneProcessedHistoryImages } from "./history-image-prune.js";
 import { detectAndLoadPromptImages } from "./images.js";
 import { buildAttemptReplayMetadata } from "./incomplete-turn.js";
@@ -784,6 +789,13 @@ export async function runEmbeddedAttempt(
       },
     });
 
+    // Auto-evolve: resolve skills dir and compute system prompt addendum (task signal + index).
+    const managedSkillsDir = path.join(CONFIG_DIR, "skills");
+    const autoEvolveAddendum = await getSystemPromptAddendum({
+      managedSkillsDir,
+      skillsConfig: params.config?.skills as Record<string, unknown> | undefined,
+    }).catch(() => "");
+
     const appendPrompt =
       resolveSystemPromptOverride({
         config: params.config,
@@ -793,7 +805,9 @@ export async function runEmbeddedAttempt(
         workspaceDir: effectiveWorkspace,
         defaultThinkLevel: params.thinkLevel,
         reasoningLevel: params.reasoningLevel ?? "off",
-        extraSystemPrompt: params.extraSystemPrompt,
+        extraSystemPrompt: autoEvolveAddendum
+          ? [params.extraSystemPrompt, autoEvolveAddendum].filter(Boolean).join("\n\n")
+          : params.extraSystemPrompt,
         ownerNumbers: params.ownerNumbers,
         ownerDisplay: ownerDisplay.ownerDisplay,
         ownerDisplaySecret: ownerDisplay.ownerDisplaySecret,
@@ -1700,6 +1714,17 @@ export async function runEmbeddedAttempt(
           }
         }
 
+        // Auto-evolve: match skills for this user message and inject context.
+        const autoEvolveUserResult = await autoEvolveOnUserMessage({
+          userMessage: effectivePrompt,
+          sessionId: params.sessionId,
+          managedSkillsDir,
+          skillsConfig: params.config?.skills as Record<string, unknown> | undefined,
+        }).catch(() => ({ matchedSkills: [], contextAddendum: "" }));
+        if (autoEvolveUserResult.contextAddendum) {
+          effectivePrompt = `${autoEvolveUserResult.contextAddendum}\n\n${effectivePrompt}`;
+        }
+
         if (cacheObservabilityEnabled) {
           const cacheObservation = beginPromptCacheObservation({
             sessionId: params.sessionId,
@@ -2239,7 +2264,7 @@ export async function runEmbeddedAttempt(
         // This is fire-and-forget, so we don't await
         // Run even on compaction timeout so plugins can log/cleanup
         if (hookRunner?.hasHooks("agent_end")) {
-          hookRunner
+          void hookRunner
             .runAgentEnd(
               {
                 messages: messagesSnapshot,
@@ -2309,9 +2334,13 @@ export async function runEmbeddedAttempt(
             };
           };
 
+        // Fire-and-forget post-reply hooks. Each MUST have .catch() to prevent
+        // unhandled rejections that crash the gateway (especially when multiple
+        // subagents complete in parallel, firing N hooks simultaneously).
+
         // Session-memory extraction: scoped to session, use default agent's model.
         const sessionMemorySpawnFn = buildSidecarSpawnFn(agentIdsResult.defaultAgentId);
-        extractSessionMemoryIfNeeded({
+        void extractSessionMemoryIfNeeded({
           baseDir: params.agentDir ?? resolveOpenClawAgentDir(),
           sessionId: params.sessionId,
           messages: messagesSnapshot as unknown as Array<Record<string, unknown>>,
@@ -2323,7 +2352,7 @@ export async function runEmbeddedAttempt(
         });
 
         for (const aid of agentIdList) {
-          extractMemoriesIfNeeded({
+          void extractMemoriesIfNeeded({
             agentId: aid,
             currentTurnIndex: messagesSnapshot.length,
             config: {
@@ -2336,6 +2365,29 @@ export async function runEmbeddedAttempt(
             spawnFn: buildSidecarSpawnFn(aid),
           }).catch((err) => {
             log.debug(`extract-memories: skipped for ${aid}: ${String(err)}`);
+          });
+        }
+
+        // Auto-evolve: detect task completion and trigger skill extraction.
+        const lastAssistantText = assistantTexts[assistantTexts.length - 1] ?? "";
+        if (lastAssistantText && !aborted && !promptError) {
+          void autoEvolveOnAgentReply({
+            agentReplyText: lastAssistantText,
+            sessionId: params.sessionId,
+            agentId: sessionAgentId,
+            currentTurnIndex: messagesSnapshot.length,
+            managedSkillsDir,
+            skillsConfig: params.config?.skills as Record<string, unknown> | undefined,
+            spawnFn: buildSidecarSpawnFn(sessionAgentId),
+            recentMessages: messagesSnapshot.slice(-20).flatMap((m) => {
+              if (m.role !== "user" && m.role !== "assistant") return [];
+              const text = Array.isArray(m.content)
+                ? m.content.filter((b: unknown) => (b as { type?: string }).type === "text").map((b: unknown) => (b as { text?: string }).text ?? "").join("")
+                : typeof m.content === "string" ? m.content : "";
+              return text.trim() ? [{ role: m.role as "user" | "assistant", content: text.slice(0, 2000) }] : [];
+            }),
+          }).catch((err) => {
+            log.debug(`auto-evolve: post-reply hook skipped: ${String(err)}`);
           });
         }
       } finally {

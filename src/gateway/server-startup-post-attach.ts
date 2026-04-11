@@ -299,6 +299,15 @@ export async function startGatewayPostAttachRuntime(params: {
         logTailscale: params.logTailscale,
       });
 
+  // Unlock chat.history before channel startup — it reads from file-based session
+  // storage and does not depend on channel connectivity. Keeping it blocked until
+  // startGatewaySidecars() completes (which includes slow channel init like Feishu
+  // open_id recovery) causes web clients connecting during startup to crash with
+  // UNAVAILABLE even though the data is already readable.
+  if (!params.minimalTestGateway) {
+    params.unavailableGatewayMethods.delete("chat.history");
+  }
+
   let pluginServices: PluginServicesHandle | null = null;
   if (!params.minimalTestGateway) {
     params.log.info("starting channels and sidecars...");
@@ -312,7 +321,6 @@ export async function startGatewayPostAttachRuntime(params: {
       logHooks: params.logHooks,
       logChannels: params.logChannels,
     }));
-    params.unavailableGatewayMethods.delete("chat.history");
   }
 
   if (!params.minimalTestGateway) {

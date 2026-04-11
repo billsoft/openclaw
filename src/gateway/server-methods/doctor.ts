@@ -1,6 +1,10 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { resolveAgentWorkspaceDir, resolveDefaultAgentId } from "../../agents/agent-scope.js";
+import {
+  readSkillIndex,
+  resolveAutoEvolveConfig,
+} from "../../agents/skills/auto-evolve/index.js";
 import { loadConfig } from "../../config/config.js";
 import type { OpenClawConfig } from "../../config/config.js";
 import {
@@ -13,6 +17,7 @@ import {
   resolveMemoryRemDreamingConfig,
 } from "../../memory-host-sdk/dreaming.js";
 import { getActiveMemorySearchManager } from "../../plugins/memory-runtime.js";
+import { CONFIG_DIR } from "../../utils.js";
 import { formatError } from "../server-utils.js";
 import {
   removeBackfillDiaryEntries,
@@ -955,5 +960,40 @@ export const doctorHandlers: GatewayRequestHandlers = {
       removedShortTermEntries: removed.removed,
     };
     respond(true, payload, undefined);
+  },
+
+  "doctor.skills.autoEvolve": async ({ respond }) => {
+    const cfg = loadConfig();
+    const managedSkillsDir = path.join(CONFIG_DIR, "skills");
+    const autoEvolveConfig = resolveAutoEvolveConfig(
+      cfg?.skills as Record<string, unknown> | undefined,
+    );
+    try {
+      const entries = await readSkillIndex(managedSkillsDir);
+      const indexPath = path.join(managedSkillsDir, "_auto", "_index.json");
+      let indexExists = false;
+      try {
+        await fs.stat(indexPath);
+        indexExists = true;
+      } catch {
+        // not yet created
+      }
+      const payload = {
+        enabled: autoEvolveConfig.enabled,
+        indexPath: indexExists ? indexPath : undefined,
+        skillCount: entries.length,
+        skills: entries.map((entry) => ({
+          name: entry.name,
+          description: entry.description,
+          confidence: entry.confidence,
+          useCount: entry.useCount,
+          successCount: entry.successCount,
+          location: entry.location,
+        })),
+      };
+      respond(true, payload, undefined);
+    } catch (err) {
+      respond(true, { enabled: autoEvolveConfig.enabled, skillCount: 0, skills: [], error: formatError(err) }, undefined);
+    }
   },
 };

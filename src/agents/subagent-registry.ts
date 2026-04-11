@@ -601,7 +601,9 @@ function ensureListener() {
         accountId: entry.requesterOrigin?.accountId,
         triggerCleanup: true,
       });
-    })();
+    })().catch((err) => {
+      log.warn(`lifecycle event handler failed for run=${evt.runId}: ${String(err)}`);
+    });
   });
 }
 

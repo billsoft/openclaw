@@ -596,12 +596,19 @@ export function createSubagentRegistryLifecycleController(params: {
       entry.expectsCompletionMessage === true &&
       !suppressedForSteerRestart;
     if (!shouldDeferEndedHook && shouldEmitEndedHook) {
-      await params.emitSubagentEndedHookForRun({
-        entry,
-        reason: completeParams.reason,
-        sendFarewell: completeParams.sendFarewell,
-        accountId: completeParams.accountId,
-      });
+      try {
+        await params.emitSubagentEndedHookForRun({
+          entry,
+          reason: completeParams.reason,
+          sendFarewell: completeParams.sendFarewell,
+          accountId: completeParams.accountId,
+        });
+      } catch (hookErr) {
+        params.warn("emitSubagentEndedHook failed during completeSubagentRun", {
+          error: hookErr,
+          runId: completeParams.runId,
+        });
+      }
     }
 
     if (!completeParams.triggerCleanup || suppressedForSteerRestart) {

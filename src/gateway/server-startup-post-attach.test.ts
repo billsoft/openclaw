@@ -116,8 +116,9 @@ describe("startGatewayPostAttachRuntime", () => {
     hoisted.reconcilePendingSessionIdentities.mockClear();
   });
 
-  it("re-enables chat.history after post-attach sidecars start", async () => {
+  it("re-enables chat.history before channel startup (not blocked by slow channels)", async () => {
     const unavailableGatewayMethods = new Set<string>(["chat.history"]);
+    let chatHistoryAvailableBeforeChannels = false;
 
     await startGatewayPostAttachRuntime({
       minimalTestGateway: false,
@@ -142,7 +143,10 @@ describe("startGatewayPostAttachRuntime", () => {
       pluginRegistry: { plugins: [] } as never,
       defaultWorkspaceDir: "/tmp/openclaw-workspace",
       deps: {} as never,
-      startChannels: vi.fn(async () => undefined),
+      startChannels: vi.fn(async () => {
+        // Capture whether chat.history is already available when channels start
+        chatHistoryAvailableBeforeChannels = !unavailableGatewayMethods.has("chat.history");
+      }),
       logHooks: {
         info: vi.fn(),
         warn: vi.fn(),
@@ -155,6 +159,9 @@ describe("startGatewayPostAttachRuntime", () => {
       unavailableGatewayMethods,
     });
 
+    // chat.history must be unlocked before startChannels() runs (channels can be slow)
+    expect(chatHistoryAvailableBeforeChannels).toBe(true);
+    // Still unlocked after full startup completes
     expect(unavailableGatewayMethods.has("chat.history")).toBe(false);
     expect(hoisted.startPluginServices).toHaveBeenCalledTimes(1);
     expect(hoisted.setInternalHooksEnabled).toHaveBeenCalledWith(false);
