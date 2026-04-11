@@ -13,9 +13,10 @@
 export const DEFAULT_COMPACTION_INSTRUCTIONS =
   "Write the summary body in the primary language used in the conversation.\n" +
   "CRITICAL: Respond with TEXT ONLY. Do NOT call any tools (Read, Bash, etc.). Tool calls will be REJECTED and waste the turn.\n" +
-  "Before providing the final summary, wrap your analysis in <analysis> tags to organize your thoughts and chronologically analyze the events, decisions, errors, and fixes.\n" +
+  "First, use an <analysis>...</analysis> block to chronologically analyze the events, decisions, errors, and fixes.\n" +
+  "Then, provide the final structured summary wrapped in <summary>...</summary> tags.\n" +
   "Focus on factual content: what was discussed, decisions made, and current state.\n" +
-  "Keep the required summary structure and section headers unchanged. Do not translate or alter code, file paths, identifiers, or error messages.\n" +
+  "Keep the required summary structure and section headers unchanged inside the <summary> block. Do not translate or alter code, file paths, identifiers, or error messages.\n" +
   "Optional Next Step: Include direct quotes from the most recent conversation showing EXACTLY what task you were working on. This MUST be verbatim to ensure no drift in task interpretation.";
 
 /**

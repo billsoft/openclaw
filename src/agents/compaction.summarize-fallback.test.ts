@@ -100,4 +100,56 @@ describe("summarizeWithFallback", () => {
     // Full attempt plus distinct partial transcript; timeout-classed failures do not retry.
     expect(piCodingAgentMocks.generateSummary.mock.calls.length).toBe(2);
   });
+
+  it("extracts the <summary> block when generateSummary returns structured output", async () => {
+    piCodingAgentMocks.generateSummary.mockResolvedValue(
+      "<analysis>internal scratchpad</analysis>\n<summary>## Decisions\nKeep this</summary>",
+    );
+
+    const messages: AgentMessage[] = [
+      {
+        role: "user",
+        content: "hello",
+        timestamp: 1,
+      } satisfies UserMessage,
+    ];
+
+    const result = await summarizeWithFallback({
+      messages,
+      model: testModel,
+      apiKey: "test-key", // pragma: allowlist secret
+      signal: new AbortController().signal,
+      reserveTokens: 1000,
+      maxChunkTokens: 50_000,
+      contextWindow: 200_000,
+    });
+
+    expect(result).toBe("## Decisions\nKeep this");
+  });
+
+  it("strips the <analysis> block when no <summary> block is present", async () => {
+    piCodingAgentMocks.generateSummary.mockResolvedValue(
+      "<analysis>internal scratchpad</analysis>\n## Decisions\nKeep this",
+    );
+
+    const messages: AgentMessage[] = [
+      {
+        role: "user",
+        content: "hello",
+        timestamp: 1,
+      } satisfies UserMessage,
+    ];
+
+    const result = await summarizeWithFallback({
+      messages,
+      model: testModel,
+      apiKey: "test-key", // pragma: allowlist secret
+      signal: new AbortController().signal,
+      reserveTokens: 1000,
+      maxChunkTokens: 50_000,
+      contextWindow: 200_000,
+    });
+
+    expect(result).toBe("## Decisions\nKeep this");
+  });
 });

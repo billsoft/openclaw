@@ -16,6 +16,9 @@ import { extractToolCallsFromAssistant, extractToolResultId } from "./tool-call-
 
 const log = createSubsystemLogger("compaction");
 
+const SUMMARY_BLOCK_RE = /<summary>([\s\S]*?)<\/summary>/i;
+const ANALYSIS_BLOCK_RE = /<analysis>[\s\S]*?<\/analysis>/gi;
+
 export const BASE_CHUNK_RATIO = 0.4;
 export const MIN_CHUNK_RATIO = 0.15;
 export const SAFETY_MARGIN = 1.2; // 20% buffer for estimateTokens() inaccuracy
@@ -23,7 +26,8 @@ const DEFAULT_SUMMARY_FALLBACK = "No prior history.";
 const DEFAULT_PARTS = 2;
 const MERGE_SUMMARIES_INSTRUCTIONS = [
   "CRITICAL: Respond with TEXT ONLY. Do NOT call any tools. Tool calls will be REJECTED and waste the turn.",
-  "Before providing your final summary, wrap your analysis in <analysis> tags to organize your thoughts and ensure you've covered all necessary points.",
+  "First, use an <analysis>...</analysis> block to organize your thoughts and ensure you've covered all necessary points.",
+  "Then, provide the merged final summary wrapped in <summary>...</summary> tags.",
   "",
   "Merge these partial summaries into a single cohesive summary.",
   "",
@@ -42,7 +46,8 @@ const MERGE_SUMMARIES_INSTRUCTIONS = [
 ].join("\n");
 const IDENTIFIER_PRESERVATION_INSTRUCTIONS =
   "CRITICAL: Respond with TEXT ONLY. Do NOT call any tools. Tool calls will be REJECTED and waste the turn.\n" +
-  "Before providing your final summary, wrap your analysis in <analysis> tags to organize your thoughts and chronologically analyze the events, decisions, errors, and fixes.\n" +
+  "First, use an <analysis>...</analysis> block to chronologically analyze the events, decisions, errors, and fixes.\n" +
+  "Then, provide the final structured summary wrapped in <summary>...</summary> tags.\n" +
   "Preserve all opaque identifiers exactly as written (no shortening or reconstruction), " +
   "including UUIDs, hashes, IDs, tokens, API keys, hostnames, IPs, ports, URLs, and file names.";
 
@@ -111,6 +116,22 @@ export function estimateMessagesTokens(messages: AgentMessage[]): number {
   // SECURITY: toolResult.details can contain untrusted/verbose payloads; never include in LLM-facing compaction.
   const safe = stripToolResultDetails(messages);
   return safe.reduce((sum, message) => sum + estimateTokens(message), 0);
+}
+
+export function normalizeStructuredCompactionSummary(summary: string): string {
+  const trimmed = summary.trim();
+  if (!trimmed) {
+    return trimmed;
+  }
+  const summaryMatch = trimmed.match(SUMMARY_BLOCK_RE);
+  if (summaryMatch) {
+    const extracted = summaryMatch[1]?.trim();
+    if (extracted) {
+      return extracted;
+    }
+  }
+  const withoutAnalysis = trimmed.replace(ANALYSIS_BLOCK_RE, "").trim();
+  return withoutAnalysis || trimmed;
 }
 
 function estimateCompactionMessageTokens(message: AgentMessage): number {
@@ -357,6 +378,7 @@ function generateSummary(
   customInstructions?: string,
   previousSummary?: string,
 ): Promise<string> {
+  const normalizeResult = (result: string) => normalizeStructuredCompactionSummary(result);
   if (piGenerateSummary.length >= 8) {
     return generateSummaryCompat(
       currentMessages,
@@ -367,7 +389,7 @@ function generateSummary(
       signal,
       customInstructions,
       previousSummary,
-    );
+    ).then(normalizeResult);
   }
   return generateSummaryCompat(
     currentMessages,
@@ -377,7 +399,7 @@ function generateSummary(
     signal,
     customInstructions,
     previousSummary,
-  );
+  ).then(normalizeResult);
 }
 
 /**
