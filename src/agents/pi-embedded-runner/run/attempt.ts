@@ -812,7 +812,7 @@ export async function runEmbeddedAttempt(
         config: params.config,
         agentId: sessionAgentId,
       }) ??
-      (params.parentSystemPrompt && params.extraSystemPrompt
+      (params.extraSystemPrompt
         ? params.extraSystemPrompt
         : buildEmbeddedSystemPrompt({
             workspaceDir: effectiveWorkspace,

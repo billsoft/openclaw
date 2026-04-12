@@ -941,7 +941,6 @@ async function executeViaEmbeddedRunner(
       trigger: "manual" as const,
       // Inherit tool pool from parent when available (ensures consistency)
       ...(task.toolsAllow && task.toolsAllow.length > 0 ? { toolsAllow: task.toolsAllow } : {}),
-      parentSystemPrompt: task.parentSystemPrompt,
       // extraSystemPrompt: parent's system prompt (for cache prefix sharing) +
       // fork child directive (only if the prompt doesn't already contain it).
       extraSystemPrompt:
