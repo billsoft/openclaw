@@ -132,14 +132,11 @@ export function createSendMessageTool(opts?: SendMessageToolContext): AnyAgentTo
       }
 
       try {
-        const registry = getForkRegistry();
-
         if (taskId === "all" || taskId === "*") {
-          return await handleBroadcast(registry, opts.agentSessionKey, message, messageType, opts);
+          return await handleBroadcast(opts.agentSessionKey, message, messageType, opts);
         }
 
         return await handleSingleWorker(
-          registry,
           opts.agentSessionKey,
           taskId,
           message,
@@ -161,7 +158,6 @@ export function createSendMessageTool(opts?: SendMessageToolContext): AnyAgentTo
 }
 
 async function handleSingleWorker(
-  registry: ReturnType<typeof getForkRegistry>,
   sessionKey: string,
   taskId: string,
   message: string,
@@ -169,11 +165,29 @@ async function handleSingleWorker(
   opts: SendMessageToolContext,
 ): Promise<AgentToolResult<unknown>> {
   const parentForks = getForksForParent(sessionKey);
-  const matchingFork = parentForks.find(
-    (f: ForkSession) =>
-      (f.taskId.includes(taskId) || taskId.includes(f.taskId)) &&
-      (opts?.runId ? f.conversationTurnId === opts.runId : true),
+  const visibleForks = parentForks.filter((f: ForkSession) =>
+    opts?.runId ? f.conversationTurnId === opts.runId : true,
   );
+
+  const exactMatch = visibleForks.find((f: ForkSession) => f.taskId === taskId);
+  if (exactMatch) {
+    return jsonResult(processMessage(exactMatch, sessionKey, message, type));
+  }
+
+  const fuzzyMatches = visibleForks.filter(
+    (f: ForkSession) => f.taskId.includes(taskId) || taskId.includes(f.taskId),
+  );
+
+  if (fuzzyMatches.length > 1) {
+    return jsonResult({
+      success: false,
+      taskId,
+      error: `Task id "${taskId}" is ambiguous in the current conversation turn. Please use a full task id. Matches: ${fuzzyMatches.map((f) => f.taskId).join(", ")}`,
+      workerStatus: "ambiguous",
+    });
+  }
+
+  const matchingFork = fuzzyMatches[0];
 
   if (!matchingFork) {
     return jsonResult({
@@ -188,7 +202,6 @@ async function handleSingleWorker(
 }
 
 async function handleBroadcast(
-  registry: ReturnType<typeof getForkRegistry>,
   sessionKey: string,
   message: string,
   type: string,

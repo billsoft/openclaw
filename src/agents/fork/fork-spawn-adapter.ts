@@ -380,6 +380,7 @@ export async function spawnForkSubagent(ctx: ForkSpawnContext): Promise<ForkSpaw
   const forkSession = registry.registerFork({
     parentSessionKey: ctx.parentSessionKey,
     taskId: ctx.taskId,
+    conversationTurnId: ctx.conversationTurnId,
     depth: currentDepth + 1,
   });
 
