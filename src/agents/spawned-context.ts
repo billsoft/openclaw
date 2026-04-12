@@ -16,6 +16,21 @@ export type SpawnedToolContext = {
   agentGroupChannel?: string | null;
   agentGroupSpace?: string | null;
   workspaceDir?: string;
+  /**
+   * Current turn's assistant message for prompt cache sharing.
+   * When set, fork subagents inherit the parent's conversation prefix,
+   * enabling API-level prompt cache hits across parallel workers.
+   * Can be a static value or a getter function for per-turn updates.
+   */
+  parentAssistantMessage?:
+    | import("@mariozechner/pi-agent-core").AgentMessage
+    | (() => import("@mariozechner/pi-agent-core").AgentMessage | undefined);
+  /**
+   * Parent's rendered system prompt for prompt cache sharing.
+   * When set, fork subagents receive this as extraSystemPrompt,
+   * ensuring byte-identical API request prefixes with the parent.
+   */
+  parentSystemPrompt?: string;
 };
 
 export type NormalizedSpawnedRunMetadata = {

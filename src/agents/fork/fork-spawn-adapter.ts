@@ -11,9 +11,12 @@ import {
   checkForkDepthLimits,
   FORK_BOILERPLATE_TAG,
   NEVER_ABORT_CONTROLLER,
+  buildForkedMessages,
+  getForkIsolationMode,
   type ForkResult,
   type ForkExecutionHooks,
 } from "./fork-subagent-core.js";
+import { createAgentWorktree, removeAgentWorktree } from "./fork-worktree.js";
 
 let cleanupStarted = false;
 
@@ -238,6 +241,8 @@ export interface ForkSpawnContext {
   timeoutMs?: number;
   parentAbortSignal?: AbortSignal;
   announceOnComplete?: boolean;
+  messages?: AgentMessage[];
+  parentSystemPrompt?: string;
 }
 
 export interface ForkSpawnResult {
@@ -311,9 +316,18 @@ export async function spawnForkSubagent(ctx: ForkSpawnContext): Promise<ForkSpaw
 
   let announceResult: { announced: boolean; error?: string } | null = null;
 
-  try {
-    // Use isolated context to prevent task scope confusion
-    const forkMessages = buildIsolatedForkMessages({
+  const rawContent = (ctx.assistantMessage as { content?: unknown })?.content;
+  const hasRealContent = Array.isArray(rawContent) && rawContent.length > 0;
+
+  let forkMessages: AgentMessage[];
+  if (hasRealContent) {
+    forkMessages = buildForkedMessages({
+      assistantMessage: ctx.assistantMessage,
+      directive: ctx.directive,
+      taskContext: ctx.taskContext,
+    });
+  } else {
+    forkMessages = buildIsolatedForkMessages({
       directive: ctx.directive,
       taskContext: ctx.taskContext,
       sessionMeta: {
@@ -322,63 +336,98 @@ export async function spawnForkSubagent(ctx: ForkSpawnContext): Promise<ForkSpaw
         createdAt: Date.now(),
       },
     });
+  }
 
-    registry.updateForkStatus(forkSession.forkId, "running");
+  registry.updateForkStatus(forkSession.forkId, "running");
 
-    const hooks: ForkExecutionHooks = {
-      onLifecycleEvent: (evt) => {
-        registry.recordLifecycleEvent(forkSession.forkId, evt);
-      },
-      onComplete: async (result) => {
-        registry.updateForkStatus(forkSession.forkId, result.status as ForkSession["status"], {
-          result: result.output,
-          error: result.error,
-          tokenUsage: result.tokenUsage,
-          durationMs: result.durationMs,
-        });
+  const hooks: ForkExecutionHooks = {
+    onLifecycleEvent: (evt) => {
+      registry.recordLifecycleEvent(forkSession.forkId, evt);
+    },
+    onComplete: async (result) => {
+      registry.updateForkStatus(forkSession.forkId, result.status as ForkSession["status"], {
+        result: result.output,
+        error: result.error,
+        tokenUsage: result.tokenUsage,
+        durationMs: result.durationMs,
+      });
 
-        if (ctx.announceOnComplete !== false && result.status === "completed") {
-          try {
-            // Use reliable notification with retry
-            const totalTokens = result.tokenUsage
-              ? result.tokenUsage.input + result.tokenUsage.output
-              : 0;
-            const notificationResult = await deliverNotificationWithRetry(ctx.parentSessionKey, {
-              taskId: ctx.taskId,
-              status: result.status,
-              summary: `Agent "${ctx.directive.slice(0, 120)}${ctx.directive.length > 120 ? "..." : ""}" completed`,
-              result: result.output ?? "",
-              usage: {
-                total_tokens: totalTokens,
-                duration_ms: result.durationMs ?? 0,
-              },
-              timestamp: Date.now(),
-            });
-            announceResult = {
-              announced: notificationResult.delivered,
-              error: notificationResult.error,
-            };
-            if (!notificationResult.delivered) {
-              console.error(
-                `[fork-spawn-adapter] Failed to deliver notification after ${notificationResult.retryCount} retries:`,
-                notificationResult.error,
-              );
-            }
-          } catch (err) {
+      if (ctx.announceOnComplete !== false && result.status === "completed") {
+        try {
+          // Use reliable notification with retry
+          const totalTokens = result.tokenUsage
+            ? result.tokenUsage.input + result.tokenUsage.output
+            : 0;
+          const notificationResult = await deliverNotificationWithRetry(ctx.parentSessionKey, {
+            taskId: ctx.taskId,
+            status: result.status,
+            summary: `Agent "${ctx.directive.slice(0, 120)}${ctx.directive.length > 120 ? "..." : ""}" completed`,
+            result: result.output ?? "",
+            usage: {
+              total_tokens: totalTokens,
+              duration_ms: result.durationMs ?? 0,
+            },
+            timestamp: Date.now(),
+          });
+          announceResult = {
+            announced: notificationResult.delivered,
+            error: notificationResult.error,
+          };
+          if (!notificationResult.delivered) {
             console.error(
-              `[fork-spawn-adapter] Failed to announce completion for task ${ctx.taskId}:`,
-              err,
+              `[fork-spawn-adapter] Failed to deliver notification after ${notificationResult.retryCount} retries:`,
+              notificationResult.error,
             );
           }
+        } catch (err) {
+          console.error(
+            `[fork-spawn-adapter] Failed to announce completion for task ${ctx.taskId}:`,
+            err,
+          );
         }
-      },
-    };
+      }
+    },
+  };
 
-    const combinedSignal = AbortSignal.any([
-      isolatedCtx.abortController.signal,
-      ctx.parentAbortSignal ?? NEVER_ABORT_CONTROLLER.signal,
-    ]);
+  const combinedSignal = AbortSignal.any([
+    isolatedCtx.abortController.signal,
+    ctx.parentAbortSignal ?? NEVER_ABORT_CONTROLLER.signal,
+  ]);
 
+  // Worktree isolation: create isolated working directory when enabled
+  const isolationMode = getForkIsolationMode();
+  let worktreeInfo: { path: string; name: string; isNew: boolean } | undefined;
+  const effectiveWorkspaceDir = ctx.workspaceDir ?? process.cwd();
+
+  if (isolationMode !== "none") {
+    try {
+      worktreeInfo = await createAgentWorktree({
+        repoPath: effectiveWorkspaceDir,
+        worktreeName: `fork-${ctx.taskId}`,
+      });
+      console.log(
+        `[fork-spawn] Worktree created for task ${ctx.taskId}: ${worktreeInfo.path} (isolation=${isolationMode})`,
+      );
+    } catch (wtErr) {
+      worktreeInfo = undefined;
+      console.warn(
+        `[fork-spawn] Worktree creation failed for task ${ctx.taskId}, using parent workspace directly (no isolation): ${wtErr instanceof Error ? wtErr.message : String(wtErr)}`,
+      );
+    }
+  }
+
+  // Validate that the resolved workspace dir actually exists and is accessible
+  const resolvedWorkspaceDir = worktreeInfo?.path ?? effectiveWorkspaceDir;
+  try {
+    await import("node:fs").then((fs) => fs.promises.access(resolvedWorkspaceDir));
+  } catch {
+    console.warn(
+      `[fork-spawn] Workspace dir not accessible: ${resolvedWorkspaceDir}, falling back to cwd`,
+    );
+    // Will use process.cwd() as final fallback in executeForkTask
+  }
+
+  try {
     const result = await executeForkTask(
       {
         id: ctx.taskId,
@@ -390,13 +439,27 @@ export async function spawnForkSubagent(ctx: ForkSpawnContext): Promise<ForkSpaw
         parentSessionKey: ctx.parentSessionKey,
         model: ctx.model,
         thinking: ctx.thinking,
-        workspaceDir: ctx.workspaceDir,
+        workspaceDir: worktreeInfo?.path ?? effectiveWorkspaceDir,
         scratchpadDir: isolatedCtx.taskScratchDir,
+        parentSystemPrompt: ctx.parentSystemPrompt,
       },
       forkMessages,
       combinedSignal,
       hooks,
     );
+
+    // Cleanup worktree if no changes (best-effort)
+    if (worktreeInfo?.isNew) {
+      try {
+        await removeAgentWorktree({
+          repoPath: effectiveWorkspaceDir,
+          worktreeName: `fork-${ctx.taskId}`,
+          force: true,
+        });
+      } catch {
+        // best-effort cleanup
+      }
+    }
 
     return {
       success: result.status === "completed",
@@ -412,6 +475,19 @@ export async function spawnForkSubagent(ctx: ForkSpawnContext): Promise<ForkSpaw
     };
   } catch (err) {
     const errorMsg = err instanceof Error ? err.message : String(err);
+
+    // Cleanup worktree on error
+    if (worktreeInfo?.isNew) {
+      try {
+        await removeAgentWorktree({
+          repoPath: effectiveWorkspaceDir,
+          worktreeName: `fork-${ctx.taskId}`,
+          force: true,
+        });
+      } catch {
+        // best-effort cleanup
+      }
+    }
 
     registry.updateForkStatus(forkSession.forkId, "failed", { error: errorMsg });
     registry.recordLifecycleEvent(forkSession.forkId, {

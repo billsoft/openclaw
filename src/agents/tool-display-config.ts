@@ -691,6 +691,11 @@ export const TOOL_DISPLAY_CONFIG: ToolDisplayConfig = {
       title: "TTS",
       detailKeys: ["text", "channel"],
     },
+    agent: {
+      emoji: "🤖",
+      title: "Agent",
+      detailKeys: ["prompt", "subagent_type", "description", "model", "thinking"],
+    },
   },
 };
 

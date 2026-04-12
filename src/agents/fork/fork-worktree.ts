@@ -66,6 +66,19 @@ async function gitWorktree(
 }
 
 /**
+ * Checks if a git repository has no commits (empty/unborn HEAD).
+ * Returns true if HEAD cannot be resolved (no commits yet).
+ */
+async function isEmptyGitRepo(repoPath: string): Promise<boolean> {
+  try {
+    const { stdout } = await gitWorktree(repoPath, ["rev-parse", "--verify", "HEAD"]);
+    return !stdout.trim();
+  } catch {
+    return true;
+  }
+}
+
+/**
  * Checks if a path is a valid git worktree by checking git worktree list.
  */
 async function isGitWorktree(repoPath: string, worktreePath: string): Promise<boolean> {
@@ -147,6 +160,14 @@ export async function createAgentWorktree(params: {
     return createRegularDirectory(repoPath, worktreeName, parentDir);
   }
 
+  // Pre-flight: skip git worktree for empty repos (no commits → HEAD invalid)
+  if (await isEmptyGitRepo(repoPath)) {
+    console.warn(
+      `[fork-worktree] Empty git repository detected at ${repoPath}, skipping worktree isolation (use regular directory)`,
+    );
+    return createRegularDirectory(repoPath, worktreeName, parentDir);
+  }
+
   const sanitizedName = sanitizeSlug(worktreeName);
 
   // Use parentDir if provided, otherwise use .git/worktrees/
@@ -192,12 +213,12 @@ export async function createAgentWorktree(params: {
       isNew: true,
     };
   } catch (err) {
-    // If git worktree add fails (e.g., branch already exists as worktree),
-    // fall back to creating a regular directory
-    if (err instanceof Error && err.message.includes("already exists")) {
-      return createRegularDirectory(repoPath, worktreeName, parentDir);
-    }
-    throw err;
+    // If git worktree add fails for any reason (empty repo, invalid HEAD, permission, etc.),
+    // fall back to creating a regular directory rather than failing the entire task.
+    console.warn(
+      `[fork-worktree] git worktree add failed, falling back to regular directory: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return createRegularDirectory(repoPath, worktreeName, parentDir);
   }
 }
 

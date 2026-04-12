@@ -187,6 +187,8 @@ export type ForkTaskConfig = {
   thinking?: string;
   workspaceDir?: string;
   scratchpadDir?: string;
+  /** Parent's rendered system prompt for prompt cache sharing (byte-identical prefix) */
+  parentSystemPrompt?: string;
 };
 
 export type ForkSpawnContext = {
@@ -206,11 +208,13 @@ export type ForkSpawnContext = {
   announceOnComplete?: boolean;
   /** Optional isolated messages to use instead of building from assistantMessage */
   messages?: AgentMessage[];
+  /** Parent's rendered system prompt for prompt cache sharing */
+  parentSystemPrompt?: string;
 };
 
 export type ForkExecutionHooks = {
   onLifecycleEvent?: (params: {
-    phase: "start" | "end" | "error";
+    phase: "start" | "progress" | "end" | "error";
     taskId: string;
     data?: Record<string, unknown>;
   }) => void;
@@ -264,11 +268,21 @@ export async function executeForkTask(
   const timeoutMs = task.timeoutMs ?? resolveForkConfig().defaultTimeoutMs;
   const timeoutController = new AbortController();
   let timeoutId: ReturnType<typeof setTimeout> | null = null;
+  // Progress heartbeat: report task is still running every 30s
+  const PROGRESS_HEARTBEAT_MS = 30_000;
+  let progressId: ReturnType<typeof setInterval> | null = null;
 
   const cleanupTimeout = () => {
     if (timeoutId !== null) {
       clearTimeout(timeoutId);
       timeoutId = null;
+    }
+  };
+
+  const cleanupProgress = () => {
+    if (progressId !== null) {
+      clearInterval(progressId);
+      progressId = null;
     }
   };
 
@@ -283,6 +297,18 @@ export async function executeForkTask(
     abortSignal ?? NEVER_ABORT_CONTROLLER.signal,
     timeoutController.signal,
   ]);
+
+  // Start progress heartbeat
+  progressId = setInterval(() => {
+    hooks?.onLifecycleEvent?.({
+      phase: "progress",
+      taskId: task.id,
+      data: { elapsed: Date.now() - startTime },
+    });
+  }, PROGRESS_HEARTBEAT_MS);
+  if (progressId.unref) {
+    progressId.unref();
+  }
 
   try {
     const runnerModule = await getEmbeddedRunner();
@@ -304,6 +330,7 @@ export async function executeForkTask(
     }
 
     cleanupTimeout();
+    cleanupProgress();
 
     hooks?.onLifecycleEvent?.({
       phase: result.status === "completed" ? "end" : "error",
@@ -315,6 +342,7 @@ export async function executeForkTask(
     return result;
   } catch (err) {
     cleanupTimeout();
+    cleanupProgress();
 
     const errorMsg = err instanceof Error ? err.message : String(err);
     const status: ForkResult["status"] =
@@ -351,16 +379,62 @@ async function executeViaEmbeddedRunner(
 
     const childSessionKey = `agent:fork:${task.id}:${crypto.randomUUID()}`;
 
+    // Convert forkMessages (array of AgentMessage) to a flat prompt string.
+    // The embedded runner expects `prompt` as a string, not a messages array.
+    // We serialize the forked conversation into the prompt to preserve context.
+    const promptParts: string[] = [];
+    for (const msg of forkMessages) {
+      const content = (msg as { content?: unknown }).content;
+      if (Array.isArray(content)) {
+        for (const block of content) {
+          if (typeof block === "object" && block !== null) {
+            const b = block as Record<string, unknown>;
+            if (b.type === "text" && typeof b.text === "string") {
+              promptParts.push(b.text);
+            } else if (b.type === "tool_use") {
+              const name = typeof b.name === "string" ? b.name : "unknown";
+              const input = b.input != null ? JSON.stringify(b.input) : "{}";
+              promptParts.push(`[ToolUse: ${name}(${input})]`);
+            } else if (b.type === "tool_result") {
+              const rawContent = b.content;
+              let text: string;
+              if (Array.isArray(rawContent)) {
+                text = (rawContent as Array<Record<string, unknown>>)
+                  .filter((c) => c.type === "text")
+                  .map((c) => (typeof c.text === "string" ? c.text : ""))
+                  .join("\n");
+              } else if (typeof rawContent === "string") {
+                text = rawContent;
+              } else {
+                text = rawContent != null ? JSON.stringify(rawContent) : "";
+              }
+              const toolId = typeof b.tool_use_id === "string" ? b.tool_use_id : "";
+              promptParts.push(`[ToolResult for ${toolId}]: ${text.slice(0, 500)}`);
+            }
+          } else if (typeof block === "string") {
+            promptParts.push(block);
+          }
+        }
+      } else if (typeof content === "string") {
+        promptParts.push(content);
+      }
+    }
+
+    const isolationMode = getForkIsolationMode();
+    const useSandbox = isolationMode === "sandbox";
+
     const sessionResult = await runEmbeddedPiAgent({
       sessionKey: childSessionKey,
-      messages: forkMessages,
+      prompt: promptParts.join("\n\n"),
       mode: "run",
       model: task.model,
       thinking: task.thinking,
       workspaceDir: task.workspaceDir ?? process.cwd(),
-      sandbox: true,
+      sandbox: useSandbox,
       abortSignal,
       trigger: "manual" as const,
+      // Pass parent's system prompt for cache-identical API prefix when available
+      ...(task.parentSystemPrompt ? { extraSystemPrompt: task.parentSystemPrompt } : {}),
     });
 
     const output = extractStructuredOutput(sessionResult);

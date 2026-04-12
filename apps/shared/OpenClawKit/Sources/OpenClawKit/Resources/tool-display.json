@@ -1106,12 +1106,15 @@
         "channel"
       ]
     },
-    "parallel_spawn": {
-      "emoji": "🚀",
-      "title": "Parallel Spawn",
+    "agent": {
+      "emoji": "🤖",
+      "title": "Agent",
       "detailKeys": [
-        "tasks",
-        "config"
+        "prompt",
+        "subagent_type",
+        "description",
+        "model",
+        "thinking"
       ]
     }
   }

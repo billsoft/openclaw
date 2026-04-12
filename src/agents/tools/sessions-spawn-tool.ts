@@ -303,12 +303,17 @@ export function createSessionsSpawnTool(
       // Fork mode (default): bypasses Gateway pairing, in-process execution
       if (isForkSubagentEnabled() && opts?.agentSessionKey && runtime === "subagent") {
         try {
+          const rawParentMsg = opts?.parentAssistantMessage;
+          const parentMsg = typeof rawParentMsg === "function" ? rawParentMsg() : rawParentMsg;
+
           const forkResult = await spawnForkSubagent({
             parentSessionKey: opts.agentSessionKey,
-            assistantMessage: {
-              role: "assistant",
-              content: [],
-            } as unknown as import("@mariozechner/pi-agent-core").AgentMessage,
+            assistantMessage:
+              parentMsg ??
+              ({
+                role: "assistant",
+                content: [],
+              } as unknown as import("@mariozechner/pi-agent-core").AgentMessage),
             taskId: `spawn-${Date.now()}`,
             directive: task,
             taskContext: label || undefined,
@@ -334,10 +339,19 @@ export function createSessionsSpawnTool(
             executionMode: "fork",
             announced: forkResult.announced,
           });
-          // eslint-disable-next-line no-unused-vars
-        } catch (_) {
+        } catch (err) {
           // Fork failed, fall through to legacy subagent path
+          console.warn(
+            `[sessions_spawn] Fork spawn failed, falling back to legacy subagent path (may encounter Gateway pairing issues): ${err instanceof Error ? err.message : String(err)}`,
+          );
         }
+      }
+
+      // Legacy subagent path: may be blocked by Gateway pairing (1008)
+      if (runtime === "subagent") {
+        console.warn(
+          `[sessions_spawn] Using legacy subagent_direct path for runtime=subagent. This requires Gateway WebSocket pairing and may fail with code 1008 in environments without active gateway connection.`,
+        );
       }
 
       const result = await spawnSubagentDirect(

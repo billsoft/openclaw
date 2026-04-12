@@ -8,7 +8,7 @@ export type ForkSessionStatus =
   | "cancelled"
   | "timeout";
 
-export type ForkLifecyclePhase = "start" | "end" | "error";
+export type ForkLifecyclePhase = "start" | "progress" | "end" | "error";
 
 export interface ForkLifecycleEvent {
   phase: ForkLifecyclePhase;

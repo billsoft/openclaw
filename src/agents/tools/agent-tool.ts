@@ -40,9 +40,26 @@ type SpawnedToolContext = {
   requesterAgentIdOverride?: string;
   workspaceDir?: string;
   scratchpadDir?: string;
+  parentAssistantMessage?:
+    | import("@mariozechner/pi-agent-core").AgentMessage
+    | (() => import("@mariozechner/pi-agent-core").AgentMessage | undefined);
+  parentSystemPrompt?: string;
 } & BaseSpawnedToolContext;
 import { AGENT_TOOL_DISPLAY_SUMMARY } from "../tool-description-presets.js";
 import { jsonResult, readNumberParam, readStringParam } from "./common.js";
+
+function resolveParentAssistantMessage(
+  ctx?: SpawnedToolContext,
+): import("@mariozechner/pi-agent-core").AgentMessage | undefined {
+  const raw = ctx?.parentAssistantMessage;
+  if (raw === undefined) {
+    return undefined;
+  }
+  if (typeof raw === "function") {
+    return raw();
+  }
+  return raw;
+}
 
 function describeAgentTool(): string {
   return [
@@ -169,6 +186,7 @@ export function createAgentTool(opts?: SpawnedToolContext): AnyAgentTool {
 
       // --- Synchronous batch mode (run_in_background: false, tasks array) ---
       if (!runInBackground) {
+        const AUTO_BACKGROUND_MS = 120_000; // 2 minutes — same as Claude Code
         const taskList = rawTasks?.length
           ? rawTasks.map((t, idx) => ({
               id: readStringParam(t, "id") ?? `${description}-${idx + 1}`,
@@ -210,10 +228,12 @@ export function createAgentTool(opts?: SpawnedToolContext): AnyAgentTool {
 
         const contexts: ForkSpawnContext[] = taskList.map((t) => ({
           parentSessionKey: opts.agentSessionKey!,
-          assistantMessage: {
-            role: "assistant",
-            content: [],
-          } as unknown as import("@mariozechner/pi-agent-core").AgentMessage,
+          assistantMessage:
+            resolveParentAssistantMessage(opts) ??
+            ({
+              role: "assistant",
+              content: [],
+            } as unknown as import("@mariozechner/pi-agent-core").AgentMessage),
           taskId: `agent-sync-${t.id}-${Date.now()}`,
           directive: t.task,
           taskContext: t.description || undefined,
@@ -224,9 +244,18 @@ export function createAgentTool(opts?: SpawnedToolContext): AnyAgentTool {
           thinking: t.thinking,
           timeoutMs: t.timeout_seconds ? t.timeout_seconds * 1000 : undefined,
           announceOnComplete: false, // inline result
+          parentSystemPrompt: opts.parentSystemPrompt,
         }));
 
         const results = await spawnForkSubagents(contexts, 5);
+
+        // Auto-background detection: if total execution exceeded threshold, log warning
+        const totalDuration = results.reduce((sum, r) => sum + (r.durationMs ?? 0), 0);
+        if (totalDuration > AUTO_BACKGROUND_MS) {
+          console.warn(
+            `[agent-tool] Sync batch execution took ${Math.round(totalDuration / 1000)}s (threshold: ${AUTO_BACKGROUND_MS / 1000}s). Consider using run_in_background: true for long-running tasks.`,
+          );
+        }
 
         // Update coordinator with results and parse structured output
         for (let i = 0; i < results.length; i++) {
@@ -289,10 +318,12 @@ export function createAgentTool(opts?: SpawnedToolContext): AnyAgentTool {
       // Fire and forget — result arrives via <task-notification> XML announce
       const ctx: ForkSpawnContext = {
         parentSessionKey: opts.agentSessionKey,
-        assistantMessage: {
-          role: "assistant",
-          content: [],
-        } as unknown as import("@mariozechner/pi-agent-core").AgentMessage,
+        assistantMessage:
+          resolveParentAssistantMessage(opts) ??
+          ({
+            role: "assistant",
+            content: [],
+          } as unknown as import("@mariozechner/pi-agent-core").AgentMessage),
         taskId,
         directive: prompt,
         taskContext: description,
@@ -303,6 +334,7 @@ export function createAgentTool(opts?: SpawnedToolContext): AnyAgentTool {
         thinking: thinkingOverride,
         timeoutMs: timeoutSeconds ? timeoutSeconds * 1000 : undefined,
         announceOnComplete: true,
+        parentSystemPrompt: opts.parentSystemPrompt,
       };
 
       void spawnForkSubagent(ctx).catch((err) => {
