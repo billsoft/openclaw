@@ -196,6 +196,7 @@ export class FullCoordinator {
           task.status = "completed";
           task.result = result.output;
           task.completedAt = Date.now();
+          task.tokenUsage = result.tokenUsage;
 
           // 更新 SimpleCoordinator
           this.simpleCoordinator.updateTaskStatus(

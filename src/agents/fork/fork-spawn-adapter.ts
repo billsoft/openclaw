@@ -249,6 +249,7 @@ export interface ForkSpawnResult {
   status?: ForkResult["status"];
   durationMs?: number;
   announced?: boolean;
+  tokenUsage?: { input: number; output: number };
 }
 
 export async function spawnForkSubagent(ctx: ForkSpawnContext): Promise<ForkSpawnResult> {
@@ -405,6 +406,7 @@ export async function spawnForkSubagent(ctx: ForkSpawnContext): Promise<ForkSpaw
       error: result.error,
       status: result.status,
       durationMs: result.durationMs,
+      tokenUsage: result.tokenUsage,
       announced:
         (announceResult as { announced: boolean; error?: string } | null)?.announced ?? false,
     };

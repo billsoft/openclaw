@@ -20,6 +20,8 @@ import {
   isForkSubagentEnabled,
   spawnForkSubagent,
   spawnForkSubagents,
+  SimpleCoordinator,
+  parseAgentResult,
   type ForkSpawnContext,
 } from "../fork/index.js";
 import type { SpawnedToolContext as BaseSpawnedToolContext } from "../spawned-context.js";
@@ -196,6 +198,16 @@ export function createAgentTool(opts?: SpawnedToolContext): AnyAgentTool {
           });
         }
 
+        // Use SimpleCoordinator for task management and result parsing
+        const coordinator = new SimpleCoordinator({
+          maxConcurrent: 5,
+        });
+
+        // Add tasks to coordinator
+        for (const task of taskList) {
+          coordinator.addTask(task.id, task.task);
+        }
+
         const contexts: ForkSpawnContext[] = taskList.map((t) => ({
           parentSessionKey: opts.agentSessionKey!,
           assistantMessage: {
@@ -216,15 +228,51 @@ export function createAgentTool(opts?: SpawnedToolContext): AnyAgentTool {
 
         const results = await spawnForkSubagents(contexts, 5);
 
+        // Update coordinator with results and parse structured output
+        for (let i = 0; i < results.length; i++) {
+          const result = results[i];
+          const taskId = taskList[i].id;
+
+          if (result.success && result.output) {
+            coordinator.updateTaskStatus(taskId, "completed", result.output, undefined, {
+              durationMs: result.durationMs,
+            });
+          } else {
+            coordinator.updateTaskStatus(
+              taskId,
+              "failed",
+              undefined,
+              result.error ?? "Unknown error",
+              { durationMs: result.durationMs },
+            );
+          }
+        }
+
+        // Build results with parsed structured output
+        const parsedResults = coordinator.getAllTasks().map((t) => {
+          const parsed = t.rawOutput ? parseAgentResult(t.rawOutput) : null;
+          return {
+            taskId: t.taskId,
+            status: t.status,
+            output: t.rawOutput ?? t.error ?? "(no output)",
+            parsed: parsed
+              ? {
+                  scope: parsed.scope,
+                  result: parsed.result,
+                  keyFiles: parsed.keyFiles,
+                  filesChanged: parsed.filesChanged,
+                  issues: parsed.issues,
+                }
+              : null,
+            durationMs: t.durationMs,
+          };
+        });
+
         return jsonResult({
           status: "ok",
           executionMode: "fork-sync",
-          results: results.map((r, idx) => ({
-            taskId: taskList[idx].id,
-            status: r.success ? "completed" : "failed",
-            output: r.output ?? r.error ?? "(no output)",
-            durationMs: r.durationMs,
-          })),
+          summary: coordinator.generateSummary(),
+          results: parsedResults,
         });
       }
 
