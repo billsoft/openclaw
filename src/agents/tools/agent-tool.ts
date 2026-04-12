@@ -26,6 +26,12 @@ import {
   type ForkSpawnResult,
 } from "../fork/index.js";
 import type { SpawnedToolContext as BaseSpawnedToolContext } from "../spawned-context.js";
+import {
+  loadSessionStore,
+  resolveAgentIdFromSessionKey,
+  resolveStorePath,
+  loadConfig,
+} from "../subagent-announce-delivery.runtime.js";
 import type { AnyAgentTool } from "./common.js";
 
 type SpawnedToolContext = {
@@ -67,6 +73,39 @@ function resolveParentAssistantMessage(
     return raw();
   }
   return raw;
+}
+
+/**
+ * Resolves the model configuration from the parent session.
+ * Used to inherit the parent's model when spawning fork subagents.
+ */
+function resolveParentModel(
+  sessionKey?: string,
+): { provider?: string; model?: string } | undefined {
+  if (!sessionKey) {
+    return undefined;
+  }
+  try {
+    const cfg = loadConfig();
+    const agentId = resolveAgentIdFromSessionKey(sessionKey);
+    const storePath = resolveStorePath(cfg.session?.store, { agentId });
+    const store = loadSessionStore(storePath);
+    const entry = store[sessionKey];
+    if (!entry) {
+      return undefined;
+    }
+    // Prefer explicit modelOverride if set
+    if (entry.modelOverride) {
+      return { model: entry.modelOverride, provider: entry.providerOverride };
+    }
+    // Fall back to runtime model
+    if (entry.model) {
+      return { model: entry.model, provider: entry.modelProvider };
+    }
+    return undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function describeAgentTool(): string {
@@ -168,6 +207,9 @@ export function createAgentTool(opts?: SpawnedToolContext): AnyAgentTool {
       const timeoutSeconds = readNumberParam(params, "timeout_seconds");
       const rawTasks = params.tasks as Array<Record<string, unknown>> | undefined;
 
+      // Inherit model configuration from parent session (ensures fork workers use the same model/provider)
+      const inheritedModel = resolveParentModel(opts?.agentSessionKey);
+
       // Recursion guard: fork children cannot spawn nested agents
       if (isForkExecutionActive()) {
         return jsonResult({
@@ -248,7 +290,9 @@ export function createAgentTool(opts?: SpawnedToolContext): AnyAgentTool {
           workspaceDir: opts.workspaceDir,
           scratchpadDir: opts.scratchpadDir,
           depth: 0,
-          model: t.model,
+          // Inherit model/provider from parent session if not explicitly overridden
+          model: t.model ?? modelOverride ?? inheritedModel?.model,
+          provider: inheritedModel?.provider,
           thinking: t.thinking,
           timeoutMs: t.timeout_seconds ? t.timeout_seconds * 1000 : undefined,
           announceOnComplete: true,
@@ -373,7 +417,9 @@ export function createAgentTool(opts?: SpawnedToolContext): AnyAgentTool {
         workspaceDir: opts.workspaceDir,
         scratchpadDir: opts.scratchpadDir,
         depth: 0,
-        model: modelOverride,
+        // Inherit model/provider from parent session if not explicitly overridden
+        model: modelOverride ?? inheritedModel?.model,
+        provider: inheritedModel?.provider,
         thinking: thinkingOverride,
         timeoutMs: timeoutSeconds ? timeoutSeconds * 1000 : undefined,
         announceOnComplete: true,

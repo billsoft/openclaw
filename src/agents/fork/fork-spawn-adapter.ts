@@ -298,7 +298,10 @@ export interface ForkSpawnContext {
   scratchpadDir?: string;
   workspaceDir?: string;
   depth?: number;
+  /** Model override for the fork worker (inherits from parent if not set) */
   model?: string;
+  /** Provider override for the fork worker (inherits from parent if not set) */
+  provider?: string;
   thinking?: string;
   priority?: "high" | "medium" | "low";
   timeoutMs?: number;
@@ -497,6 +500,7 @@ export async function spawnForkSubagent(ctx: ForkSpawnContext): Promise<ForkSpaw
         depth: currentDepth + 1,
         parentSessionKey: ctx.parentSessionKey,
         model: ctx.model,
+        provider: ctx.provider,
         thinking: ctx.thinking,
         workspaceDir: effectiveWorkspaceDir,
         scratchpadDir: isolatedCtx.taskScratchDir,

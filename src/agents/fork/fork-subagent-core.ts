@@ -332,6 +332,8 @@ export type ForkTaskConfig = {
   depth?: number;
   parentSessionKey?: string;
   model?: string;
+  /** Provider for the model (e.g. 'minimax', 'openai'). Inherited from parent if not set. */
+  provider?: string;
   thinking?: string;
   workspaceDir?: string;
   scratchpadDir?: string;
@@ -935,6 +937,7 @@ async function executeViaEmbeddedRunner(
       prompt: promptText,
       mode: "run",
       model: task.model,
+      provider: task.provider,
       thinking: task.thinking,
       workspaceDir: task.workspaceDir ?? process.cwd(),
       sandbox: useSandbox,
