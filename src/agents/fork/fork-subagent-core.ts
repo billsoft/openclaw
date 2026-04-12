@@ -341,32 +341,6 @@ export type ForkTaskConfig = {
   toolsAllow?: string[];
 };
 
-export type ForkSpawnContext = {
-  parentSessionKey: string;
-  assistantMessage: AgentMessage;
-  taskId: string;
-  directive: string;
-  taskContext?: string;
-  workspaceDir?: string;
-  scratchpadDir?: string;
-  depth?: number;
-  model?: string;
-  thinking?: string;
-  priority?: "high" | "medium" | "low";
-  timeoutMs?: number;
-  parentAbortSignal?: AbortSignal;
-  announceOnComplete?: boolean;
-  /** Optional isolated messages to use instead of building from assistantMessage */
-  messages?: AgentMessage[];
-  /** Parent's rendered system prompt for prompt cache sharing */
-  parentSystemPrompt?: string;
-  /**
-   * Optional tool allow-list inherited from parent agent.
-   * When set, ensures the fork child uses the same tool pool as the parent.
-   */
-  toolsAllow?: string[];
-};
-
 export type ForkExecutionHooks = {
   onLifecycleEvent?: (params: {
     phase: "start" | "progress" | "end" | "error";
@@ -856,9 +830,15 @@ async function executeViaEmbeddedRunner(
     const isolationMode = getForkIsolationMode();
     const useSandbox = isolationMode === "sandbox";
 
+    // Detect whether the prompt already contains the fork-boilerplate directive
+    // (injected by buildForkChildMessage via buildForkedMessages). If so, skip
+    // adding FORK_CHILD_SYSTEM_DIRECTIVE again to avoid duplicate instructions.
+    const promptText = promptParts.join("\n\n");
+    const promptHasForkDirective = promptText.includes(FORK_BOILERPLATE_TAG);
+
     const sessionResult = await runEmbeddedPiAgent({
       sessionKey: childSessionKey,
-      prompt: promptParts.join("\n\n"),
+      prompt: promptText,
       mode: "run",
       model: task.model,
       thinking: task.thinking,
@@ -868,14 +848,14 @@ async function executeViaEmbeddedRunner(
       trigger: "manual" as const,
       // Inherit tool pool from parent when available (ensures consistency)
       ...(task.toolsAllow && task.toolsAllow.length > 0 ? { toolsAllow: task.toolsAllow } : {}),
-      // Build extraSystemPrompt: parent's prompt (for cache) + fork child directive (anti-recursion)
-      ...(task.parentSystemPrompt || FORK_CHILD_SYSTEM_DIRECTIVE
-        ? {
-            extraSystemPrompt: [task.parentSystemPrompt, FORK_CHILD_SYSTEM_DIRECTIVE]
-              .filter(Boolean)
-              .join("\n\n"),
-          }
-        : {}),
+      // extraSystemPrompt: parent's system prompt (for cache prefix sharing) +
+      // fork child directive (only if the prompt doesn't already contain it).
+      extraSystemPrompt: [
+        task.parentSystemPrompt,
+        promptHasForkDirective ? undefined : FORK_CHILD_SYSTEM_DIRECTIVE,
+      ]
+        .filter(Boolean)
+        .join("\n\n") || undefined,
     });
 
     const output = extractStructuredOutput(sessionResult);

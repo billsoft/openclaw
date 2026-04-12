@@ -422,17 +422,32 @@ export async function spawnForkSubagent(ctx: ForkSpawnContext): Promise<ForkSpaw
         durationMs: result.durationMs,
       });
 
-      if (ctx.announceOnComplete !== false && result.status === "completed") {
+      // Notify on ALL terminal states (completed, failed, timeout, cancelled) —
+      // a silent failure is worse than a noisy one.
+      const isTerminal =
+        result.status === "completed" ||
+        result.status === "failed" ||
+        result.status === "timeout" ||
+        result.status === "cancelled";
+      if (ctx.announceOnComplete !== false && isTerminal) {
         try {
           // Use reliable notification with retry
           const totalTokens = result.tokenUsage
             ? result.tokenUsage.input + result.tokenUsage.output
             : 0;
+          const statusVerb =
+            result.status === "completed"
+              ? "completed"
+              : result.status === "timeout"
+                ? "timed out"
+                : result.status === "cancelled"
+                  ? "was cancelled"
+                  : `failed: ${result.error?.slice(0, 80) ?? "unknown error"}`;
           const notificationResult = await deliverNotificationWithRetry(ctx.parentSessionKey, {
             taskId: ctx.taskId,
             status: result.status,
-            summary: `Agent "${ctx.directive.slice(0, 120)}${ctx.directive.length > 120 ? "..." : ""}" completed`,
-            result: result.output ?? "",
+            summary: `Agent "${ctx.directive.slice(0, 120)}${ctx.directive.length > 120 ? "..." : ""}" ${statusVerb}`,
+            result: result.output ?? result.error ?? "",
             usage: {
               total_tokens: totalTokens,
               duration_ms: result.durationMs ?? 0,
