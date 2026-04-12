@@ -85,14 +85,20 @@ HARD RULES (non-negotiable):
 4. SILENT EXECUTION: Do not narrate tool calls. Use tools, then report once at the end.
 5. SCOPE BOUNDARY: Stay strictly within your directive. Do not expand scope or do "bonus" work.
 6. COMMIT CHANGES: If you modify files, commit before reporting. Include the commit hash.
-7. STRUCTURED OUTPUT: Your response MUST begin with "Scope:". Keep report under 500 words.
+7. STRUCTURED OUTPUT: Your response MUST follow the REQUIRED FORMAT below exactly.
 
-Output format:
-  Scope: <one sentence echoing your assigned scope>
-  Result: <key findings or what was done>
-  Key files: <relevant file paths>
-  Files changed: <list with commit hash, or "none">
-  Issues: <blockers or problems, or "none">
+REQUIRED OUTPUT FORMAT - Your response will be parsed programmatically:
+  Scope: <one sentence echoing your assigned scope, max 100 chars>
+  Result: <what was done or key findings, max 300 words>
+  Key files: <comma-separated list of relevant file paths, or "none">
+  Files changed: <comma-separated list with commit hash format "path (hash)", or "none">
+  Issues: <comma-separated list of blockers, or "none">
+
+IMPORTANT:
+- Each field MUST be on its own line starting with the label (Scope:, Result:, etc.)
+- Do NOT add extra text before "Scope:" or after the last field
+- Use "none" (lowercase) for empty lists
+- If you modified files, ALWAYS commit and include the hash in Files changed
 </${FORK_BOILERPLATE_TAG}>
 
 [FORK_DIRECTIVE]: ${directive}`;
@@ -181,6 +187,25 @@ export type ForkTaskConfig = {
   thinking?: string;
   workspaceDir?: string;
   scratchpadDir?: string;
+};
+
+export type ForkSpawnContext = {
+  parentSessionKey: string;
+  assistantMessage: AgentMessage;
+  taskId: string;
+  directive: string;
+  taskContext?: string;
+  workspaceDir?: string;
+  scratchpadDir?: string;
+  depth?: number;
+  model?: string;
+  thinking?: string;
+  priority?: "high" | "medium" | "low";
+  timeoutMs?: number;
+  parentAbortSignal?: AbortSignal;
+  announceOnComplete?: boolean;
+  /** Optional isolated messages to use instead of building from assistantMessage */
+  messages?: AgentMessage[];
 };
 
 export type ForkExecutionHooks = {

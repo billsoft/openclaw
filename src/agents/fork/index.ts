@@ -46,6 +46,29 @@ export {
   cancelFork,
   cancelAllForks,
   parseForkOutput,
+  // Context isolation - prevents task scope confusion
+  buildIsolatedForkMessages,
+  extractRelevantFiles,
+  type IsolatedForkContext,
+  // Heartbeat monitoring - detects stuck tasks
+  startTaskHeartbeatMonitoring,
+  stopTaskHeartbeatMonitoring,
   type ForkSpawnContext,
   type ForkSpawnResult,
 } from "./fork-spawn-adapter.js";
+
+// Agent result parsing - structured output parsing
+export {
+  parseAgentResult,
+  validateAgentResult,
+  synthesizeAgentResults,
+  type ParsedAgentResult,
+} from "./agent-result-parser.js";
+
+// Simple coordinator - manages multiple fork tasks
+export {
+  SimpleCoordinator,
+  createCoordinator,
+  type TaskInfo,
+  type CoordinatorOptions,
+} from "./simple-coordinator.js";

@@ -1,8 +1,9 @@
 import type { AgentMessage } from "@mariozechner/pi-agent-core";
+// Import internal event system for notification delivery (avoids Gateway pairing)
+import { queueEmbeddedPiMessage } from "../subagent-announce-delivery.runtime.js";
 import { createIsolatedSpawnContext } from "../subagent-isolation.js";
 import { getForkRegistry, startForkRegistryCleanup, type ForkSession } from "./fork-registry.js";
 import {
-  buildForkedMessages,
   executeForkTask,
   isForkSubagentEnabled,
   isForkExecutionActive,
@@ -15,6 +16,212 @@ import {
 } from "./fork-subagent-core.js";
 
 let cleanupStarted = false;
+
+// ============================================================================
+// Notification Tracking - Prevents lost task completion notifications
+// ============================================================================
+
+interface NotificationPayload {
+  taskId: string;
+  status: "completed" | "failed" | "cancelled" | "timeout";
+  summary: string;
+  result: string;
+  usage: {
+    total_tokens: number;
+    duration_ms: number;
+  };
+  timestamp: number;
+  retryCount?: number;
+}
+
+interface PendingNotification {
+  payload: NotificationPayload;
+  deliveredAt?: number;
+  attempts: number;
+  lastAttempt: number;
+}
+
+interface UnconfirmedNotification {
+  taskId: string;
+  payload: NotificationPayload;
+  timeSinceDelivery: number;
+}
+
+class NotificationTracker {
+  private pendingNotifications = new Map<string, PendingNotification>();
+
+  registerNotification(payload: NotificationPayload): void {
+    this.pendingNotifications.set(payload.taskId, {
+      payload,
+      attempts: 0,
+      lastAttempt: Date.now(),
+    });
+  }
+
+  confirmDelivery(taskId: string): void {
+    const notification = this.pendingNotifications.get(taskId);
+    if (notification) {
+      notification.deliveredAt = Date.now();
+    }
+  }
+
+  getUnconfirmedNotifications(olderThanMs: number = 30000): UnconfirmedNotification[] {
+    const now = Date.now();
+    const unconfirmed: UnconfirmedNotification[] = [];
+
+    for (const [taskId, notification] of this.pendingNotifications) {
+      if (!notification.deliveredAt && now - notification.lastAttempt > olderThanMs) {
+        unconfirmed.push({
+          taskId,
+          payload: notification.payload,
+          timeSinceDelivery: now - notification.lastAttempt,
+        });
+      }
+    }
+
+    return unconfirmed;
+  }
+
+  cleanup(maxAgeMs: number = 300_000): number {
+    const now = Date.now();
+    let cleaned = 0;
+
+    for (const [taskId, notification] of this.pendingNotifications) {
+      const age = notification.deliveredAt
+        ? now - notification.deliveredAt
+        : now - notification.lastAttempt;
+
+      if (age > maxAgeMs) {
+        this.pendingNotifications.delete(taskId);
+        cleaned++;
+      }
+    }
+
+    return cleaned;
+  }
+}
+
+const notificationTracker = new NotificationTracker();
+
+// ============================================================================
+// Reliable Notification Delivery with Retry
+// ============================================================================
+
+async function deliverNotificationWithRetry(
+  parentSessionKey: string,
+  payload: NotificationPayload,
+): Promise<{ delivered: boolean; error?: string; retryCount: number }> {
+  const MAX_RETRIES = 3;
+  const RETRY_DELAYS = [1000, 2000, 4000];
+
+  notificationTracker.registerNotification(payload);
+
+  // Strategy 1: Try internal event system first (no Gateway pairing required)
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      const message = buildNotificationMessage({ ...payload, retryCount: attempt });
+
+      // Parse sessionId from sessionKey
+      const sessionId = parseSessionIdFromKey(parentSessionKey);
+
+      if (sessionId) {
+        // Use internal event queue - no Gateway connection needed
+        const steered = queueEmbeddedPiMessage(sessionId, message);
+        if (steered) {
+          notificationTracker.confirmDelivery(payload.taskId);
+          return { delivered: true, retryCount: attempt };
+        }
+      }
+
+      // If steer failed and not last attempt, wait and retry
+      if (attempt < MAX_RETRIES) {
+        const delay = RETRY_DELAYS[attempt] || RETRY_DELAYS[RETRY_DELAYS.length - 1];
+        await new Promise((resolve) => setTimeout(resolve, delay));
+      }
+    } catch {
+      // Continue to retry
+      if (attempt < MAX_RETRIES) {
+        const delay = RETRY_DELAYS[attempt] || RETRY_DELAYS[RETRY_DELAYS.length - 1];
+        await new Promise((resolve) => setTimeout(resolve, delay));
+      }
+    }
+  }
+
+  // Strategy 2: Fallback to announceForkCompletion (uses existing Gateway connection)
+  try {
+    const registry = getForkRegistry();
+    const forks = registry.getForksForParent(parentSessionKey);
+    const fork = forks.find((f) => f.taskId === payload.taskId);
+
+    if (fork) {
+      const result = await announceForkCompletion({
+        parentSessionKey,
+        childSessionKey: `fork:${fork.forkId}`,
+        taskId: payload.taskId,
+        directive: payload.summary,
+        output: payload.result,
+        status: payload.status,
+        durationMs: payload.usage.duration_ms,
+      });
+
+      if (result.announced) {
+        notificationTracker.confirmDelivery(payload.taskId);
+        return { delivered: true, retryCount: MAX_RETRIES };
+      }
+    }
+  } catch {
+    // Fallback also failed
+  }
+
+  return {
+    delivered: false,
+    error: "Failed to deliver notification via all channels",
+    retryCount: MAX_RETRIES,
+  };
+}
+
+/**
+ * Parse sessionId from sessionKey for internal event delivery
+ */
+function parseSessionIdFromKey(sessionKey: string): string | undefined {
+  // Try to extract sessionId from various formats
+  const match1 = sessionKey.match(/session:([^:]+)/);
+  if (match1) {
+    return match1[1];
+  }
+
+  const match2 = sessionKey.match(/:session:([^:]+)/);
+  if (match2) {
+    return match2[1];
+  }
+
+  const match3 = sessionKey.match(/session-([^\s:]+)/);
+  if (match3) {
+    return match3[1];
+  }
+
+  return undefined;
+}
+
+function buildNotificationMessage(payload: NotificationPayload): string {
+  const { taskId, status, summary, result, usage, retryCount } = payload;
+
+  return [
+    "<task-notification>",
+    `<task-id>${taskId}</task-id>`,
+    `<status>${status}</status>`,
+    `<summary>${summary}${retryCount ? ` (retry ${retryCount})` : ""}</summary>`,
+    "<result>",
+    result || "(no output)",
+    "</result>",
+    "<usage>",
+    `<total_tokens>${usage.total_tokens}</total_tokens>`,
+    `<duration_ms>${usage.duration_ms}</duration_ms>`,
+    `<timestamp>${payload.timestamp}</timestamp>`,
+    "</usage>",
+    "</task-notification>",
+  ].join("\n");
+}
 
 export interface ForkSpawnContext {
   parentSessionKey: string;
@@ -104,10 +311,15 @@ export async function spawnForkSubagent(ctx: ForkSpawnContext): Promise<ForkSpaw
   let announceResult: { announced: boolean; error?: string } | null = null;
 
   try {
-    const forkMessages = buildForkedMessages({
-      assistantMessage: ctx.assistantMessage,
+    // Use isolated context to prevent task scope confusion
+    const forkMessages = buildIsolatedForkMessages({
       directive: ctx.directive,
       taskContext: ctx.taskContext,
+      sessionMeta: {
+        taskId: ctx.taskId,
+        parentSessionKey: ctx.parentSessionKey,
+        createdAt: Date.now(),
+      },
     });
 
     registry.updateForkStatus(forkSession.forkId, "running");
@@ -126,21 +338,36 @@ export async function spawnForkSubagent(ctx: ForkSpawnContext): Promise<ForkSpaw
 
         if (ctx.announceOnComplete !== false && result.status === "completed") {
           try {
-            announceResult = await announceForkCompletion({
-              parentSessionKey: ctx.parentSessionKey,
-              childSessionKey: `fork:${forkSession.forkId}`,
+            // Use reliable notification with retry
+            const totalTokens = result.tokenUsage
+              ? result.tokenUsage.input + result.tokenUsage.output
+              : 0;
+            const notificationResult = await deliverNotificationWithRetry(ctx.parentSessionKey, {
               taskId: ctx.taskId,
-              directive: ctx.directive,
-              output: result.output ?? "",
               status: result.status,
-              durationMs: result.durationMs,
-              tokenUsage: result.tokenUsage,
+              summary: `Agent "${ctx.directive.slice(0, 120)}${ctx.directive.length > 120 ? "..." : ""}" completed`,
+              result: result.output ?? "",
+              usage: {
+                total_tokens: totalTokens,
+                duration_ms: result.durationMs ?? 0,
+              },
+              timestamp: Date.now(),
             });
-          } catch (announceErr) {
             announceResult = {
-              announced: false,
-              error: announceErr instanceof Error ? announceErr.message : String(announceErr),
+              announced: notificationResult.delivered,
+              error: notificationResult.error,
             };
+            if (!notificationResult.delivered) {
+              console.error(
+                `[fork-spawn-adapter] Failed to deliver notification after ${notificationResult.retryCount} retries:`,
+                notificationResult.error,
+              );
+            }
+          } catch (err) {
+            console.error(
+              `[fork-spawn-adapter] Failed to announce completion for task ${ctx.taskId}:`,
+              err,
+            );
           }
         }
       },
@@ -219,9 +446,7 @@ async function announceForkCompletion(params: {
       return { announced: false, error: "Gateway delivery not available" };
     }
 
-    const totalTokens = params.tokenUsage
-      ? params.tokenUsage.input + params.tokenUsage.output
-      : 0;
+    const totalTokens = params.tokenUsage ? params.tokenUsage.input + params.tokenUsage.output : 0;
 
     // Use claude-code-compatible <task-notification> XML format so the coordinator
     // system prompt's "Worker Results" section matches actual delivery format.
@@ -365,3 +590,136 @@ export const __testing = {
   announceForkCompletion,
   parseForkOutput,
 };
+
+// ============================================================================
+// Heartbeat Monitoring - Detects stuck or lost tasks
+// ============================================================================
+
+let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+
+export function startTaskHeartbeatMonitoring(): void {
+  if (heartbeatTimer) {
+    return;
+  }
+
+  const STUCK_THRESHOLD = 300_000; // 5 minutes
+  const HEARTBEAT_INTERVAL = 30_000; // 30 seconds
+
+  heartbeatTimer = setInterval(() => {
+    try {
+      const registry = getForkRegistry();
+      const stuckForks = registry.findStuckForks(STUCK_THRESHOLD);
+
+      for (const stuckTask of stuckForks) {
+        console.warn(`[ForkHeartbeat] Found stuck task: ${stuckTask.taskId} (${stuckTask.status})`);
+
+        // Check if we have an unconfirmed notification
+        const unconfirmed = notificationTracker.getUnconfirmedNotifications();
+        const hasUnconfirmedNotification = unconfirmed.some((n) => n.taskId === stuckTask.taskId);
+
+        if (hasUnconfirmedNotification) {
+          // Try to redeliver the notification
+          const notification = unconfirmed.find((n) => n.taskId === stuckTask.taskId);
+          if (notification) {
+            console.log(
+              `[ForkHeartbeat] Attempting to redeliver notification for stuck task: ${stuckTask.taskId}`,
+            );
+            void deliverNotificationWithRetry(stuckTask.parentSessionKey, notification.payload);
+          }
+        } else {
+          // Abort the stuck task
+          console.log(`[ForkHeartbeat] Aborting stuck task: ${stuckTask.taskId}`);
+          registry.abortFork(stuckTask.forkId);
+        }
+      }
+
+      // Cleanup old notifications
+      notificationTracker.cleanup();
+    } catch (err) {
+      console.error("[ForkHeartbeat] Error during heartbeat check:", err);
+    }
+  }, HEARTBEAT_INTERVAL);
+
+  if (heartbeatTimer.unref) {
+    heartbeatTimer.unref();
+  }
+}
+
+export function stopTaskHeartbeatMonitoring(): void {
+  if (heartbeatTimer) {
+    clearInterval(heartbeatTimer);
+    heartbeatTimer = null;
+  }
+}
+
+// ============================================================================
+// Context Isolation - Prevents task scope confusion
+// ============================================================================
+
+export interface IsolatedForkContext {
+  directive: string;
+  taskContext?: string;
+  sessionMeta: {
+    taskId: string;
+    parentSessionKey: string;
+    createdAt: number;
+  };
+}
+
+/**
+ * Builds isolated fork messages to prevent context confusion
+ * Replaces full conversation context with clean task-specific messages
+ */
+export function buildIsolatedForkMessages(context: IsolatedForkContext): AgentMessage[] {
+  const { directive, taskContext, sessionMeta } = context;
+
+  const taskHeader = [
+    `=== TASK ${sessionMeta.taskId} ===`,
+    `Session: ${sessionMeta.parentSessionKey}`,
+    `Created: ${new Date(sessionMeta.createdAt).toISOString()}`,
+    "",
+    taskContext ? `CONTEXT: ${taskContext}\n` : "",
+    "DIRECTIVE:",
+    directive,
+    "",
+    "SCOPE LIMITATIONS:",
+    "- Execute ONLY the directive above",
+    "- Do NOT reference or continue any previous work",
+    "- Do NOT assume context from other tasks",
+    "- Report completion and stop",
+  ].join("\n");
+
+  const cleanUserMessage: AgentMessage = {
+    role: "user",
+    content: [{ type: "text", text: taskHeader }],
+  } as AgentMessage;
+
+  return [cleanUserMessage];
+}
+
+/**
+ * Extracts relevant file paths from a directive for scope validation
+ */
+export function extractRelevantFiles(directive: string): string[] {
+  const filePatterns = [
+    /[`']([^`']+\.(ts|js|tsx|jsx|py|go|rs|java|cpp|c|h|json|yaml|yml|md|txt|sh|ps1|bat))[`']/g,
+    /["']([^"']+\.(ts|js|tsx|jsx|py|go|rs|java|cpp|c|h|json|yaml|yml|md|txt|sh|ps1|bat))["']/g,
+    /(\b(?:src|lib|app|components|utils|tests|docs|config|scripts)\/[^/\s]+\.(?:ts|js|tsx|jsx|py|go|rs|java|cpp|c|h|json|yaml|yml|md|txt|sh|ps1|bat)\b)/g,
+  ];
+
+  const files = new Set<string>();
+
+  for (const pattern of filePatterns) {
+    const matches = directive.match(pattern);
+    if (matches) {
+      for (const match of matches) {
+        const filePath = match.replace(/['"`]/g, "");
+        if (filePath.includes(".")) {
+          files.add(filePath);
+        }
+      }
+    }
+  }
+
+  return Array.from(files);
+}
