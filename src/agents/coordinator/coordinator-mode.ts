@@ -102,7 +102,8 @@ export function getWorkerToolNames(params: {
     "grep_search",
     "find_by_name",
     "list_dir",
-    "sessions_spawn", // Workers can spawn their own sub-workers
+    "agent", // Preferred: fork-mode in-process worker spawning
+    "sessions_spawn", // Legacy: kept for ACP/thread mode compat
     "subagents", // Workers can manage their children
   ];
 

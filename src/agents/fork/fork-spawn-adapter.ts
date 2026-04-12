@@ -5,6 +5,7 @@ import {
   buildForkedMessages,
   executeForkTask,
   isForkSubagentEnabled,
+  isForkExecutionActive,
   resolveForkConfig,
   checkForkDepthLimits,
   FORK_BOILERPLATE_TAG,
@@ -49,6 +50,17 @@ export async function spawnForkSubagent(ctx: ForkSpawnContext): Promise<ForkSpaw
       success: false,
       taskId: ctx.taskId,
       error: "Fork subagent is disabled (OPENCLAW_ENABLE_FORK_SUBAGENT=0)",
+    };
+  }
+
+  // Recursion guard: fork children must not spawn nested forks (same as claude-code's isInForkChild check).
+  // isForkExecutionActive() is true whenever this process is currently inside an executeForkTask() call.
+  if (isForkExecutionActive()) {
+    return {
+      success: false,
+      taskId: ctx.taskId,
+      error:
+        "Fork nesting is not allowed. You are already running inside a fork worker. Execute tasks directly instead of spawning nested agents.",
     };
   }
 
@@ -207,29 +219,26 @@ async function announceForkCompletion(params: {
       return { announced: false, error: "Gateway delivery not available" };
     }
 
-    const statsLine = [
-      `duration=${((params.durationMs ?? 0) / 1000).toFixed(1)}s`,
-      params.tokenUsage
-        ? `tokens=${params.tokenUsage.input + params.tokenUsage.output}`
-        : undefined,
-    ]
-      .filter(Boolean)
-      .join(", ");
+    const totalTokens = params.tokenUsage
+      ? params.tokenUsage.input + params.tokenUsage.output
+      : 0;
 
+    // Use claude-code-compatible <task-notification> XML format so the coordinator
+    // system prompt's "Worker Results" section matches actual delivery format.
     const triggerMessage = [
-      `[Fork Task Complete]`,
-      ``,
-      `**Task**: ${params.taskId}`,
-      `**Directive**: ${params.directive.slice(0, 200)}${params.directive.length > 200 ? "..." : ""}`,
-      `**Status**: ${params.status}`,
-      statsLine ? `**Stats**: ${statsLine}` : "",
-      ``,
-      `---`,
-      ``,
+      `<task-notification>`,
+      `<task-id>${params.taskId}</task-id>`,
+      `<status>${params.status}</status>`,
+      `<summary>Agent "${params.directive.slice(0, 120)}${params.directive.length > 120 ? "..." : ""}" ${params.status === "completed" ? "completed" : `failed: ${params.status}`}</summary>`,
+      `<result>`,
       params.output || "(no output)",
-    ]
-      .filter(Boolean)
-      .join("\n");
+      `</result>`,
+      `<usage>`,
+      `<total_tokens>${totalTokens}</total_tokens>`,
+      `<duration_ms>${params.durationMs ?? 0}</duration_ms>`,
+      `</usage>`,
+      `</task-notification>`,
+    ].join("\n");
 
     await callGateway({
       method: "agent",

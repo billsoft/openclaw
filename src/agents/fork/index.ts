@@ -1,5 +1,6 @@
 export {
   isForkSubagentEnabled,
+  isForkExecutionActive,
   isCacheSharingEnabled,
   getForkMaxConcurrent,
   getForkIsolationMode,

@@ -1,3 +1,4 @@
+export const AGENT_TOOL_DISPLAY_SUMMARY = "Spawn an agent task (fork mode, in-process).";
 export const EXEC_TOOL_DISPLAY_SUMMARY = "Run shell commands that start now.";
 export const PROCESS_TOOL_DISPLAY_SUMMARY = "Inspect and control running exec sessions.";
 export const CRON_TOOL_DISPLAY_SUMMARY = "Schedule cron jobs, reminders, and wake events.";
@@ -37,8 +38,8 @@ export function describeSessionsSpawnTool(): string {
     '`mode="run"` is one-shot and `mode="session"` is persistent or thread-bound.',
     "Subagents inherit the parent workspace directory automatically.",
     "This tool is FULLY ASYNCHRONOUS (fire-and-forget). It returns `accepted` immediately, freeing you to reply to the user or spawn more workers in parallel.",
-    "Results will automatically be delivered back to you as internal system events (`[Internal task completion event]`) when the worker finishes.",
-    "Use this for all substantive delegation and multi-agent orchestration.",
+    "Results will automatically be delivered back to you as internal system events when the worker finishes.",
+    "Prefer the `agent` tool for standard fork-mode workers. Use `sessions_spawn` for ACP harness requests (`runtime: \"acp\"`), persistent thread sessions (`thread: true`), or when fork mode is unavailable.",
   ].join(" ");
 }
 

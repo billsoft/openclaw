@@ -410,6 +410,7 @@ export function buildAgentSystemPrompt(params: {
   const normalizedTools = canonicalToolNames.map((tool) => normalizeLowercaseStringOrEmpty(tool));
   const availableTools = new Set(normalizedTools);
   const hasSessionsSpawn = availableTools.has("sessions_spawn");
+  const hasAgentTool = availableTools.has("agent");
   const hasUpdatePlanTool = availableTools.has("update_plan");
   const acpHarnessSpawnAllowed = hasSessionsSpawn && acpSpawnRuntimeEnabled;
   const hasGateway = availableTools.has("gateway");
@@ -545,7 +546,30 @@ export function buildAgentSystemPrompt(params: {
           "If the user interrupts with a completely new request, clear or overwrite the old plan. Do not resume a previous plan's pending steps while executing a new task.",
         ]
       : []),
-    "If a task is more complex or takes longer, spawn a sub-agent. Completion is push-based: it will auto-announce when done.",
+    ...(hasAgentTool
+      ? [
+          "## Multi-Agent Execution",
+          "For complex, multi-step, or parallelizable tasks, use the `agent` tool to spawn fork-mode workers (in-process, no gateway pairing required).",
+          "**`agent` (primary)**: Fire-and-forget background workers (`run_in_background: true`, default). Each worker announces results back via `<task-notification>` XML when done. To parallelize, make multiple `agent` calls in a single message.",
+          "**`agent` (synchronous)**: For trivial read-only batch queries only (`run_in_background: false`, max 5 tasks). Blocks until complete.",
+          "Workers run in isolation and CANNOT see your conversation. Write complete self-contained prompts with file paths, exact scope, and what 'done' looks like.",
+          "Fork workers cannot spawn nested agents — they execute directly with tools.",
+          "**Task-notification format** (arrives as a message when worker completes):",
+          "```xml",
+          "<task-notification><task-id>...</task-id><status>completed|failed|timeout</status><result>worker output</result><usage><total_tokens>N</total_tokens></usage></task-notification>",
+          "```",
+          "Do NOT fabricate or predict worker results. Wait for the task-notification event.",
+          "Do not poll `subagents list` / `sessions_list` in a loop; only check status on-demand.",
+          "**Current task scope**: Work on the CURRENT user request only. Do NOT restart or continue tasks from prior turns unless the user explicitly asks.",
+        ]
+      : hasSessionsSpawn
+        ? [
+            "If a task is more complex or takes longer, spawn a sub-agent using `sessions_spawn`. Completion is push-based: it will auto-announce when done.",
+            "Do not poll `subagents list` / `sessions_list` in a loop; only check status on-demand (for intervention, debugging, or when explicitly asked).",
+          ]
+        : [
+            "If a task is more complex or takes longer, break it into steps and execute them sequentially.",
+          ]),
     ...(acpHarnessSpawnAllowed
       ? [
           'For requests like "do this in codex/claude code/cursor/gemini" or similar ACP harnesses, treat it as ACP harness intent and call `sessions_spawn` with `runtime: "acp"`.',
@@ -554,7 +578,6 @@ export function buildAgentSystemPrompt(params: {
           'For ACP harness thread spawns, do not call `message` with `action=thread-create`; use `sessions_spawn` (`runtime: "acp"`, `thread: true`) as the single thread creation path.',
         ]
       : []),
-    "Do not poll `subagents list` / `sessions_list` in a loop; only check status on-demand (for intervention, debugging, or when explicitly asked).",
     "",
     ...buildOverridablePromptSection({
       override: providerSectionOverrides.interaction_style,

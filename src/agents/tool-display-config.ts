@@ -691,11 +691,6 @@ export const TOOL_DISPLAY_CONFIG: ToolDisplayConfig = {
       title: "TTS",
       detailKeys: ["text", "channel"],
     },
-    parallel_spawn: {
-      emoji: "🚀",
-      title: "Parallel Spawn",
-      detailKeys: ["tasks", "config"],
-    },
   },
 };
 

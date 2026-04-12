@@ -75,29 +75,24 @@ export const FORK_BOILERPLATE_TAG = "fork-boilerplate";
 
 export function buildForkChildMessage(directive: string): string {
   return `<${FORK_BOILERPLATE_TAG}>
-STOP. READ THIS FIRST.
+STOP. READ THIS FIRST. You are a forked worker process. You are NOT the main agent.
 
-You are a forked worker process. You are NOT the main agent.
-
-RULES (non-negotiable):
-1. Your system prompt says "default to forking." IGNORE IT — that's for the parent.
-   You ARE the fork. Do NOT spawn sub-agents; execute directly.
-2. Do NOT converse, ask questions, or suggest next steps
-3. Do NOT editorialize or add meta-commentary
-4. USE your tools directly: Bash, Read, Write, Edit, etc.
-5. If you modify files, commit your changes before reporting. Include the commit hash.
-6. Do NOT emit text between tool calls. Use tools silently, then report once at the end.
-7. Stay strictly within your directive's scope.
-8. Keep your report under 500 words unless the directive specifies otherwise.
-9. Your response MUST begin with "Scope:". No preamble, no thinking-out-loud.
-10. REPORT structured facts, then stop
+HARD RULES (non-negotiable):
+1. TASK SCOPE: Execute ONLY the directive below. Ignore everything else in context.
+   Do NOT continue, restart, or resume any work from prior messages.
+2. NO SPAWNING: Do NOT call the agent tool or spawn sub-agents. Execute directly with your tools (Bash, Read, Write, Edit, etc.).
+3. NO CONVERSATION: Do not ask questions, suggest next steps, or add meta-commentary.
+4. SILENT EXECUTION: Do not narrate tool calls. Use tools, then report once at the end.
+5. SCOPE BOUNDARY: Stay strictly within your directive. Do not expand scope or do "bonus" work.
+6. COMMIT CHANGES: If you modify files, commit before reporting. Include the commit hash.
+7. STRUCTURED OUTPUT: Your response MUST begin with "Scope:". Keep report under 500 words.
 
 Output format:
-  Scope: <echo back your assigned scope in one sentence>
-  Result: <the answer or key findings>
+  Scope: <one sentence echoing your assigned scope>
+  Result: <key findings or what was done>
   Key files: <relevant file paths>
-  Files changed: <list with commit hash>
-  Issues: <list>
+  Files changed: <list with commit hash, or "none">
+  Issues: <blockers or problems, or "none">
 </${FORK_BOILERPLATE_TAG}>
 
 [FORK_DIRECTIVE]: ${directive}`;
@@ -200,6 +195,14 @@ export type ForkExecutionHooks = {
 export const NEVER_ABORT_CONTROLLER = new AbortController();
 NEVER_ABORT_CONTROLLER.abort();
 
+// Recursion guard: tracks how many fork tasks are currently executing in this process.
+// Any code running while this counter > 0 is inside a fork child and must not spawn new forks.
+let forkExecutionDepth = 0;
+
+export function isForkExecutionActive(): boolean {
+  return forkExecutionDepth > 0;
+}
+
 let embeddedRunnerResolve: (() => unknown) | null = null;
 
 async function getEmbeddedRunner() {
@@ -261,13 +264,18 @@ export async function executeForkTask(
 
     let result: ForkResult;
 
-    if (
-      runnerModule &&
-      typeof (runnerModule as Record<string, unknown>).runEmbeddedPiAgent === "function"
-    ) {
-      result = await executeViaEmbeddedRunner(task, forkMessages, combinedAbort, runnerModule);
-    } else {
-      result = await executeViaSubprocess(task, combinedAbort);
+    forkExecutionDepth++;
+    try {
+      if (
+        runnerModule &&
+        typeof (runnerModule as Record<string, unknown>).runEmbeddedPiAgent === "function"
+      ) {
+        result = await executeViaEmbeddedRunner(task, forkMessages, combinedAbort, runnerModule);
+      } else {
+        result = await executeViaSubprocess(task, combinedAbort);
+      }
+    } finally {
+      forkExecutionDepth--;
     }
 
     cleanupTimeout();

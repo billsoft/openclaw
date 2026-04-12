@@ -1,4 +1,5 @@
 import {
+  AGENT_TOOL_DISPLAY_SUMMARY,
   CRON_TOOL_DISPLAY_SUMMARY,
   EXEC_TOOL_DISPLAY_SUMMARY,
   PROCESS_TOOL_DISPLAY_SUMMARY,
@@ -163,6 +164,14 @@ const CORE_TOOL_DEFINITIONS: CoreToolDefinition[] = [
     description: SESSIONS_SEND_TOOL_DISPLAY_SUMMARY,
     sectionId: "sessions",
     profiles: ["coding", "messaging"],
+    includeInOpenClawGroup: true,
+  },
+  {
+    id: "agent",
+    label: "agent",
+    description: AGENT_TOOL_DISPLAY_SUMMARY,
+    sectionId: "sessions",
+    profiles: ["coding"],
     includeInOpenClawGroup: true,
   },
   {
