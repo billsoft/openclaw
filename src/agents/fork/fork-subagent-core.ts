@@ -355,7 +355,8 @@ export type ForkExecutionHooks = {
 };
 
 export const NEVER_ABORT_CONTROLLER = new AbortController();
-NEVER_ABORT_CONTROLLER.abort();
+// Note: do NOT call abort() - this signal must NEVER be aborted.
+// It's used as a fallback when no abortSignal is provided.
 
 // Retry configuration for transient failures
 const MAX_RETRIES = 3;
