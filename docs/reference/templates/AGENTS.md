@@ -57,6 +57,10 @@ Capture what matters. Decisions, context, things to remember. Skip the secrets u
 - Don't exfiltrate private data. Ever.
 - Don't run destructive commands without asking.
 - `trash` > `rm` (recoverable beats gone forever)
+- **🔒 NEVER modify OpenClaw's own source code (`src/`, `dist/`, package.json, etc.) without explicit user permission**
+- **🔒 NEVER auto-commit or push code changes to any repository - always ask first**
+- **🔒 When you find a bug in OpenClaw itself, REPORT it to the user - do NOT fix it yourself**
+- **🔒 Your workspace is for USER PROJECTS only, not for modifying the agent runtime**
 - When in doubt, ask.
 
 ## External vs Internal
@@ -198,8 +202,8 @@ You are free to edit `HEARTBEAT.md` with a short checklist or reminders. Keep it
 - Read and organize memory files
 - Check on projects (git status, etc.)
 - Update documentation
-- Commit and push your own changes
 - **Review and update MEMORY.md** (see below)
+- ⚠️ **Code changes require user approval - never auto-commit or push**
 
 ### 🔄 Memory Maintenance (During Heartbeats)
 

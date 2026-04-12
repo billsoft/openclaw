@@ -586,6 +586,7 @@ async function announceForkCompletion(params: {
       params: {
         sessionKey: params.parentSessionKey,
         message: triggerMessage,
+        idempotencyKey: `fork-notify:${params.taskId}:${Date.now()}`,
       },
     });
 

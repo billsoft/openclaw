@@ -315,8 +315,24 @@ async function ensureGitRepo(dir: string, isBrandNewWorkspace: boolean) {
   if (!(await isGitAvailable())) {
     return;
   }
+
+  const autoInit = process.env.OPENCLAW_WORKSPACE_AUTO_GIT_INIT === "1";
+  if (!autoInit) {
+    console.log(
+      `[workspace] Git repository not initialized in ${dir}. ` +
+        `Set OPENCLAW_WORKSPACE_AUTO_GIT_INIT=1 to enable automatic git init, ` +
+        `or run 'git init && git commit --allow-empty -m "initial commit"' manually.`,
+    );
+    return;
+  }
+
   try {
     await runCommandWithTimeout(["git", "init"], { cwd: dir, timeoutMs: 10_000 });
+    console.warn(
+      `[workspace] Auto-initialized git repo in ${dir}. ` +
+        `NOTE: Empty repos (no commits) will cause worktree creation to fail. ` +
+        `Consider running 'git commit --allow-empty -m "initial commit"' after setup.`,
+    );
   } catch {
     // Ignore git init failures; workspace creation should still succeed.
   }
