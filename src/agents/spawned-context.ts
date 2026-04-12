@@ -27,10 +27,10 @@ export type SpawnedToolContext = {
     | (() => import("@mariozechner/pi-agent-core").AgentMessage | undefined);
   /**
    * Parent's rendered system prompt for prompt cache sharing.
-   * When set, fork subagents receive this as extraSystemPrompt,
+   * When set (as a value or getter), fork subagents receive this as extraSystemPrompt,
    * ensuring byte-identical API request prefixes with the parent.
    */
-  parentSystemPrompt?: string;
+  parentSystemPrompt?: string | (() => string | undefined);
 };
 
 export type NormalizedSpawnedRunMetadata = {

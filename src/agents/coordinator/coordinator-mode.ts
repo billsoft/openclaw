@@ -4,7 +4,6 @@
  */
 
 import type { OpenClawConfig } from "../../config/config.js";
-import { normalizeOptionalLowercaseString } from "../../shared/string-coerce.js";
 
 /**
  * Check if coordinator mode should be enabled for this agent.

@@ -61,7 +61,7 @@ export async function ensureScratchpadDir(dir: string): Promise<void> {
 export async function cleanupScratchpadDir(dir: string): Promise<void> {
   try {
     await fs.rm(dir, { recursive: true, force: true });
-  } catch (err) {
+  } catch {
     // Best-effort cleanup - don't throw if directory doesn't exist or can't be removed
   }
 }

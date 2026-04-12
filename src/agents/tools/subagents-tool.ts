@@ -1,5 +1,6 @@
 import { Type } from "@sinclair/typebox";
 import { loadConfig } from "../../config/config.js";
+import { getForksForParent } from "../fork/index.js";
 import { optionalStringEnum } from "../schema/typebox.js";
 import {
   DEFAULT_RECENT_MINUTES,
@@ -60,6 +61,20 @@ export function createSubagentsTool(opts?: { agentSessionKey?: string }): AnyAge
           runs,
           recentMinutes,
         });
+
+        const forkWorkers = opts?.agentSessionKey
+          ? getForksForParent(opts.agentSessionKey)
+              .filter((f) => f.status === "running" || f.status === "pending")
+              .map((f) => ({
+                taskId: f.taskId,
+                status: f.status,
+                depth: f.depth ?? 0,
+                createdAt: f.createdAt,
+                startedAt: f.startedAt,
+                durationMs: f.startedAt ? Date.now() - f.startedAt : undefined,
+              }))
+          : [];
+
         return jsonResult({
           status: "ok",
           action: "list",
@@ -70,6 +85,10 @@ export function createSubagentsTool(opts?: { agentSessionKey?: string }): AnyAge
           active: list.active.map(({ line: _line, ...view }) => view),
           recent: list.recent.map(({ line: _line, ...view }) => view),
           text: list.text,
+          forkWorkers: {
+            total: forkWorkers.length,
+            workers: forkWorkers,
+          },
         });
       }
 

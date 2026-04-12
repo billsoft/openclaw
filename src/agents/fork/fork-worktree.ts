@@ -153,6 +153,16 @@ export async function createAgentWorktree(params: {
     throw new Error(`Invalid worktree name: ${worktreeName}`);
   }
 
+  // Pre-flight: verify repoPath exists and is accessible
+  try {
+    await fs.access(repoPath, fs.constants.R_OK);
+  } catch {
+    console.warn(
+      `[fork-worktree] Repository path does not exist or is not accessible: ${repoPath}. Using current working directory as fallback.`,
+    );
+    return createRegularDirectory(process.cwd(), worktreeName, parentDir);
+  }
+
   const isolationMode = getForkIsolationMode();
 
   // If isolation mode is "none", just create a regular directory

@@ -1116,6 +1116,15 @@
         "model",
         "thinking"
       ]
+    },
+    "send_message_to_worker": {
+      "emoji": "📨",
+      "title": "Send Message",
+      "detailKeys": [
+        "task_id",
+        "message",
+        "message_type"
+      ]
     }
   }
 }

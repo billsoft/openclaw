@@ -23,6 +23,7 @@ import {
   SimpleCoordinator,
   parseAgentResult,
   type ForkSpawnContext,
+  type ForkSpawnResult,
 } from "../fork/index.js";
 import type { SpawnedToolContext as BaseSpawnedToolContext } from "../spawned-context.js";
 import type { AnyAgentTool } from "./common.js";
@@ -43,7 +44,14 @@ type SpawnedToolContext = {
   parentAssistantMessage?:
     | import("@mariozechner/pi-agent-core").AgentMessage
     | (() => import("@mariozechner/pi-agent-core").AgentMessage | undefined);
-  parentSystemPrompt?: string;
+  parentSystemPrompt?: string | (() => string | undefined);
+  /**
+   * Tool allow-list from the parent agent's current tool set.
+   * When provided, fork children will inherit only these tools,
+   * ensuring tool pool consistency and preventing access to
+   * tools not available in the parent context.
+   */
+  toolsAllow?: string[];
 } & BaseSpawnedToolContext;
 import { AGENT_TOOL_DISPLAY_SUMMARY } from "../tool-description-presets.js";
 import { jsonResult, readNumberParam, readStringParam } from "./common.js";
@@ -245,17 +253,34 @@ export function createAgentTool(opts?: SpawnedToolContext): AnyAgentTool {
           timeoutMs: t.timeout_seconds ? t.timeout_seconds * 1000 : undefined,
           announceOnComplete: false, // inline result
           parentSystemPrompt: opts.parentSystemPrompt,
+          // Inherit tool pool from parent for consistency
+          toolsAllow: opts.toolsAllow,
         }));
 
-        const results = await spawnForkSubagents(contexts, 5);
+        // Execute with auto-background timeout: if total execution exceeds the
+        // threshold, return early with partial results and let remaining tasks
+        // continue in the background (results arrive via <task-notification>).
+        let autoBackgroundTimer: ReturnType<typeof setTimeout> | null = null;
+        const results = await Promise.race([
+          spawnForkSubagents(contexts, 5),
+          new Promise<ForkSpawnResult[]>((resolve) => {
+            autoBackgroundTimer = setTimeout(() => {
+              console.warn(
+                `[agent-tool] Sync batch exceeded ${AUTO_BACKGROUND_MS / 1000}s threshold. Returning early — remaining tasks will report via <task-notification>.`,
+              );
+              autoBackgroundTimer = null;
+              resolve([]); // Empty array signals "auto-backgrounded" to caller
+            }, AUTO_BACKGROUND_MS);
+          }),
+        ]);
 
-        // Auto-background detection: if total execution exceeded threshold, log warning
-        const totalDuration = results.reduce((sum, r) => sum + (r.durationMs ?? 0), 0);
-        if (totalDuration > AUTO_BACKGROUND_MS) {
-          console.warn(
-            `[agent-tool] Sync batch execution took ${Math.round(totalDuration / 1000)}s (threshold: ${AUTO_BACKGROUND_MS / 1000}s). Consider using run_in_background: true for long-running tasks.`,
-          );
+        // Clean up timer to prevent memory leak (even if race resolved first)
+        if (autoBackgroundTimer) {
+          clearTimeout(autoBackgroundTimer);
+          autoBackgroundTimer = null;
         }
+
+        const isAutoBackgrounded = results.length === 0 && taskList.length > 0;
 
         // Update coordinator with results and parse structured output
         for (let i = 0; i < results.length; i++) {
@@ -278,6 +303,23 @@ export function createAgentTool(opts?: SpawnedToolContext): AnyAgentTool {
         }
 
         // Build results with parsed structured output
+        if (isAutoBackgrounded) {
+          // Auto-backgrounded: all tasks are still running in the background.
+          // Return pending status — results will arrive via <task-notification>.
+          return jsonResult({
+            status: "ok",
+            executionMode: "fork-auto-backgrounded",
+            summary: `${taskList.length} task(s) exceeded ${AUTO_BACKGROUND_MS / 1000}s threshold. Running in background — results will arrive via <task-notification>.`,
+            results: taskList.map((t) => ({
+              taskId: t.id,
+              status: "running" as const,
+              output: "(task is running in background)",
+              parsed: null,
+              durationMs: 0,
+            })),
+          });
+        }
+
         const parsedResults = coordinator.getAllTasks().map((t) => {
           const parsed = t.rawOutput ? parseAgentResult(t.rawOutput) : null;
           return {
@@ -335,6 +377,8 @@ export function createAgentTool(opts?: SpawnedToolContext): AnyAgentTool {
         timeoutMs: timeoutSeconds ? timeoutSeconds * 1000 : undefined,
         announceOnComplete: true,
         parentSystemPrompt: opts.parentSystemPrompt,
+        // Inherit tool pool from parent for consistency
+        toolsAllow: opts.toolsAllow,
       };
 
       void spawnForkSubagent(ctx).catch((err) => {

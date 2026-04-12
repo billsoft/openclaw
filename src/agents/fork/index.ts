@@ -14,6 +14,10 @@ export {
   buildForkChildMessage,
   buildForkedMessages,
   executeForkTask,
+  // Unified query interface (Claude Code compatible)
+  queryForkTask,
+  type QueryForkParams,
+  type QueryForkResult,
   type ForkResult,
   type ForkTaskConfig,
   type ForkExecutionHooks,

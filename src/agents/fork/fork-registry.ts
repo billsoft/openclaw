@@ -27,6 +27,7 @@ export interface ForkSession {
   createdAt: number;
   startedAt?: number;
   endedAt?: number;
+  updatedAt?: number;
   result?: string;
   error?: string;
   cacheKey?: string;
@@ -113,6 +114,7 @@ class ForkRegistry {
     session.status = status;
 
     const now = Date.now();
+    session.updatedAt = now;
 
     if (status === "running" && !session.startedAt) {
       session.startedAt = now;

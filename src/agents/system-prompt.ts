@@ -552,6 +552,7 @@ export function buildAgentSystemPrompt(params: {
           "For complex, multi-step, or parallelizable tasks, use the `agent` tool to spawn fork-mode workers (in-process, no gateway pairing required).",
           "**`agent` (primary)**: Fire-and-forget background workers (`run_in_background: true`, default). Each worker announces results back via `<task-notification>` XML when done. To parallelize, make multiple `agent` calls in a single message.",
           "**`agent` (synchronous)**: For trivial read-only batch queries only (`run_in_background: false`, max 5 tasks). Blocks until complete.",
+          "**`send_message_to_worker`**: Communicate with running workers. Use `message_type: 'intervention'` to redirect, `'query'` to check progress, `'cancel'` to stop, or `'context_update'` to inject new info. Use `task_id: 'all'` to broadcast.",
           "Workers run in isolation and CANNOT see your conversation. Write complete self-contained prompts with file paths, exact scope, and what 'done' looks like.",
           "Fork workers cannot spawn nested agents — they execute directly with tools.",
           "**Task-notification format** (arrives as a message when worker completes):",

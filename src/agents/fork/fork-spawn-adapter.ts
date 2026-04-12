@@ -40,6 +40,8 @@ interface NotificationPayload {
 interface PendingNotification {
   payload: NotificationPayload;
   deliveredAt?: number;
+  failedAt?: number;
+  error?: string;
   attempts: number;
   lastAttempt: number;
 }
@@ -102,6 +104,33 @@ class NotificationTracker {
 
     return cleaned;
   }
+
+  markUndelivered(taskId: string, error: string): void {
+    const notification = this.pendingNotifications.get(taskId);
+    if (notification) {
+      notification.failedAt = Date.now();
+      notification.error = error;
+      console.error(`[fork-notification-tracker] Task ${taskId} marked as undelivered: ${error}`);
+    }
+  }
+
+  getTaskStatus(taskId: string):
+    | {
+        delivered?: number;
+        failed?: number;
+        error?: string;
+      }
+    | undefined {
+    const notification = this.pendingNotifications.get(taskId);
+    if (!notification) {
+      return undefined;
+    }
+    return {
+      delivered: notification.deliveredAt,
+      failed: notification.failedAt,
+      error: notification.error,
+    };
+  }
 }
 
 const notificationTracker = new NotificationTracker();
@@ -117,7 +146,20 @@ async function deliverNotificationWithRetry(
   const MAX_RETRIES = 3;
   const RETRY_DELAYS = [1000, 2000, 4000];
 
+  if (!parentSessionKey || parentSessionKey.trim().length === 0) {
+    console.error(
+      `[fork-notification] CRITICAL: Cannot deliver notification for task ${payload.taskId}: parentSessionKey is empty or invalid`,
+    );
+    return {
+      delivered: false,
+      error: "Invalid parentSessionKey: cannot deliver notification without valid session key",
+      retryCount: 0,
+    };
+  }
+
   notificationTracker.registerNotification(payload);
+
+  let lastError: string | undefined;
 
   // Strategy 1: Try internal event system first (no Gateway pairing required)
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
@@ -134,6 +176,9 @@ async function deliverNotificationWithRetry(
           notificationTracker.confirmDelivery(payload.taskId);
           return { delivered: true, retryCount: attempt };
         }
+        lastError = `Internal event queue rejected message (attempt ${attempt + 1})`;
+      } else {
+        lastError = `Failed to parse sessionId from parentSessionKey: ${parentSessionKey.slice(0, 50)}...`;
       }
 
       // If steer failed and not last attempt, wait and retry
@@ -141,7 +186,11 @@ async function deliverNotificationWithRetry(
         const delay = RETRY_DELAYS[attempt] || RETRY_DELAYS[RETRY_DELAYS.length - 1];
         await new Promise((resolve) => setTimeout(resolve, delay));
       }
-    } catch {
+    } catch (err) {
+      lastError = err instanceof Error ? err.message : String(err);
+      console.warn(
+        `[fork-notification] Strategy 1 attempt ${attempt + 1} failed for task ${payload.taskId}: ${lastError}`,
+      );
       // Continue to retry
       if (attempt < MAX_RETRIES) {
         const delay = RETRY_DELAYS[attempt] || RETRY_DELAYS[RETRY_DELAYS.length - 1];
@@ -171,14 +220,29 @@ async function deliverNotificationWithRetry(
         notificationTracker.confirmDelivery(payload.taskId);
         return { delivered: true, retryCount: MAX_RETRIES };
       }
+      lastError = "Gateway announceForkCompletion returned not-announced";
+    } else {
+      lastError = `Fork task ${payload.taskId} not found in registry for fallback delivery`;
     }
-  } catch {
-    // Fallback also failed
+  } catch (err) {
+    lastError = err instanceof Error ? err.message : String(err);
+    console.error(
+      `[fork-notification] Strategy 2 (Gateway fallback) also failed for task ${payload.taskId}: ${lastError}`,
+    );
   }
+
+  // All strategies failed - persist the failure in registry for later retrieval
+  const finalError = `All notification channels failed. Last error: ${lastError ?? "unknown"}`;
+  console.error(
+    `[fork-notification] FAILED to deliver notification for task ${payload.taskId} after ${MAX_RETRIES + 1} attempts: ${finalError}`,
+  );
+
+  // Mark as undelivered in tracker (can be queried later)
+  notificationTracker.markUndelivered(payload.taskId, finalError);
 
   return {
     delivered: false,
-    error: "Failed to deliver notification via all channels",
+    error: finalError,
     retryCount: MAX_RETRIES,
   };
 }
@@ -242,7 +306,13 @@ export interface ForkSpawnContext {
   parentAbortSignal?: AbortSignal;
   announceOnComplete?: boolean;
   messages?: AgentMessage[];
-  parentSystemPrompt?: string;
+  parentSystemPrompt?: string | (() => string | undefined);
+  /**
+   * Optional tool allow-list inherited from parent agent.
+   * When set, ensures the fork child uses the same tool pool as the parent.
+   * This is critical for tasks that need access to specific tools (MCP, LSP, etc.)
+   */
+  toolsAllow?: string[];
 }
 
 export interface ForkSpawnResult {
@@ -441,7 +511,12 @@ export async function spawnForkSubagent(ctx: ForkSpawnContext): Promise<ForkSpaw
         thinking: ctx.thinking,
         workspaceDir: worktreeInfo?.path ?? effectiveWorkspaceDir,
         scratchpadDir: isolatedCtx.taskScratchDir,
-        parentSystemPrompt: ctx.parentSystemPrompt,
+        parentSystemPrompt:
+          typeof ctx.parentSystemPrompt === "function"
+            ? (ctx.parentSystemPrompt as () => string | undefined)()
+            : ctx.parentSystemPrompt,
+        // Inherit tool pool from parent context for consistency
+        toolsAllow: ctx.toolsAllow,
       },
       forkMessages,
       combinedSignal,

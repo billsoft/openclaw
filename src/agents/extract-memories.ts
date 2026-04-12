@@ -1,8 +1,8 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import { resolveStateDir } from "../config/paths.js";
 import { logInfo, logWarn, logDebug } from "../logger.js";
 import { resolveGlobalMemoryDir } from "../memory-host-sdk/global-memory.js";
-import { resolveStateDir } from "../config/paths.js";
 
 export type ExtractMemoriesConfig = {
   enabled: boolean;
@@ -171,10 +171,9 @@ async function applyExtractionResult(
     const safeName =
       path
         .basename(m.filename)
-        .replace(/[^a-zA-Z0-9_\-]/g, "_")
+        .replace(/[^a-zA-Z0-9_-]/g, "_")
         .replace(/\.md$/, "") + ".md";
-    const targetDir =
-      m.tier === "global" ? path.join(globalMemoryDir, "memory") : memoryDir;
+    const targetDir = m.tier === "global" ? path.join(globalMemoryDir, "memory") : memoryDir;
     const filePath = path.join(targetDir, safeName);
     try {
       await fs.writeFile(filePath, m.content, { encoding: "utf-8", mode: 0o600 });
@@ -267,10 +266,7 @@ export async function extractMemoriesIfNeeded(params: ExtractMemoriesParams): Pr
 
     // Parse the LLM's JSON output and write memory files to disk.
     const lastMsg = result.messages[result.messages.length - 1];
-    const text =
-      typeof lastMsg?.content === "string"
-        ? lastMsg.content
-        : "";
+    const text = typeof lastMsg?.content === "string" ? lastMsg.content : "";
     await applyExtractionResult(text, config.memoryDir, globalMemoryDir);
 
     logInfo(

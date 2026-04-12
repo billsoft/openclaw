@@ -13,6 +13,7 @@ import { wrapToolWorkspaceRootGuardWithOptions } from "./pi-tools.read.js";
 import type { SandboxFsBridge } from "./sandbox/fs-bridge.js";
 import type { SpawnedToolContext } from "./spawned-context.js";
 import type { ToolFsPolicy } from "./tool-fs-policy.js";
+import { createAgentTool } from "./tools/agent-tool.js";
 import { createAgentsListTool } from "./tools/agents-list-tool.js";
 import { createCanvasTool } from "./tools/canvas-tool.js";
 import type { AnyAgentTool } from "./tools/common.js";
@@ -23,8 +24,8 @@ import { createImageTool } from "./tools/image-tool.js";
 import { createMessageTool } from "./tools/message-tool.js";
 import { createMusicGenerateTool } from "./tools/music-generate-tool.js";
 import { createNodesTool } from "./tools/nodes-tool.js";
-import { createAgentTool } from "./tools/agent-tool.js";
 import { createPdfTool } from "./tools/pdf-tool.js";
+import { createSendMessageTool } from "./tools/send-message-tool.js";
 import { createSessionStatusTool } from "./tools/session-status-tool.js";
 import { createSessionsHistoryTool } from "./tools/sessions-history-tool.js";
 import { createSessionsListTool } from "./tools/sessions-list-tool.js";
@@ -116,7 +117,7 @@ export function createOpenClawTools(
   const coordinatorCfg = resolvedConfig?.agents?.defaults?.coordinator;
   const scratchpadDir =
     coordinatorCfg?.enabled === true && coordinatorCfg?.scratchpad === true
-      ? coordinatorCfg?.scratchpadDir ?? undefined
+      ? (coordinatorCfg?.scratchpadDir ?? undefined)
       : undefined;
   const sessionAgentId = resolveSessionAgentId({
     sessionKey: options?.agentSessionKey,
@@ -308,6 +309,9 @@ export function createOpenClawTools(
       requesterAgentIdOverride: options?.requesterAgentIdOverride,
       workspaceDir: spawnWorkspaceDir,
       scratchpadDir,
+    }),
+    createSendMessageTool({
+      agentSessionKey: options?.agentSessionKey,
     }),
     createSessionStatusTool({
       agentSessionKey: options?.agentSessionKey,

@@ -292,6 +292,20 @@ export function createOpenClawCodingTools(options?: {
   senderIsOwner?: boolean;
   /** Callback invoked when sessions_yield tool is called. */
   onYield?: (message: string) => Promise<void> | void;
+  /**
+   * Current turn's assistant message for prompt cache sharing.
+   * When set (as a value or getter), fork subagents inherit the parent's
+   * conversation prefix for API-level prompt cache hits across parallel workers.
+   */
+  parentAssistantMessage?:
+    | import("@mariozechner/pi-agent-core").AgentMessage
+    | (() => import("@mariozechner/pi-agent-core").AgentMessage | undefined);
+  /**
+   * Parent's rendered system prompt for prompt cache sharing.
+   * When set (as a value or getter), fork subagents receive this as extraSystemPrompt,
+   * ensuring byte-identical API request prefixes with the parent.
+   */
+  parentSystemPrompt?: string | (() => string | undefined);
 }): AnyAgentTool[] {
   const execToolName = "exec";
   const sandbox = options?.sandbox?.enabled ? options.sandbox : undefined;
@@ -567,6 +581,8 @@ export function createOpenClawCodingTools(options?: {
       sessionId: options?.sessionId,
       onYield: options?.onYield,
       allowGatewaySubagentBinding: options?.allowGatewaySubagentBinding,
+      parentAssistantMessage: options?.parentAssistantMessage,
+      parentSystemPrompt: options?.parentSystemPrompt,
     }),
   ];
   const toolsForMemoryFlush =

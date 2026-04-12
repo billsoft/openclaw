@@ -20,12 +20,7 @@ import {
 } from "openclaw/plugin-sdk/memory-core-host-status";
 import { writeDailyDreamingPhaseBlock } from "./dreaming-markdown.js";
 import { generateAndAppendDreamNarrative, type NarrativePhaseData } from "./dreaming-narrative.js";
-import {
-  asRecord,
-  formatErrorMessage,
-  includesSystemEventToken,
-  normalizeTrimmedString,
-} from "./dreaming-shared.js";
+import { asRecord, formatErrorMessage, normalizeTrimmedString } from "./dreaming-shared.js";
 import { runGlobalCurationPhase } from "./global-curation.js";
 import {
   readShortTermRecallEntries,
@@ -1646,9 +1641,7 @@ export async function runDreamingSweepPhases(params: {
       nowMs: params.nowMs,
     });
   } catch (err) {
-    params.logger.error(
-      `memory-core: global curation phase failed: ${String(err)}`,
-    );
+    params.logger.error(`memory-core: global curation phase failed: ${String(err)}`);
   }
 }
 

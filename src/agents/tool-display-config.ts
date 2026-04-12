@@ -696,6 +696,11 @@ export const TOOL_DISPLAY_CONFIG: ToolDisplayConfig = {
       title: "Agent",
       detailKeys: ["prompt", "subagent_type", "description", "model", "thinking"],
     },
+    send_message_to_worker: {
+      emoji: "📨",
+      title: "Send Message",
+      detailKeys: ["task_id", "message", "message_type"],
+    },
   },
 };
 

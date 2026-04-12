@@ -90,6 +90,7 @@ import { getSharedPromptCacheManager } from "../../prompt-cache-shared.js";
 import { registerProviderStreamForModel } from "../../provider-stream.js";
 import { resolveSandboxContext } from "../../sandbox.js";
 import { resolveSandboxRuntimeStatus } from "../../sandbox/runtime-status.js";
+import { cleanupScratchpadDir, ensureScratchpadDir } from "../../scratchpad.js";
 import { repairSessionFileIfNeeded } from "../../session-file-repair.js";
 import { extractSessionMemoryIfNeeded, getSessionMemoryContent } from "../../session-memory.js";
 import { guardSessionManager } from "../../session-tool-result-guard-wrapper.js";
@@ -109,6 +110,11 @@ import {
   applySkillEnvOverridesFromSnapshot,
   resolveSkillsPromptForRun,
 } from "../../skills.js";
+import {
+  getSystemPromptAddendum,
+  onAgentReply as autoEvolveOnAgentReply,
+  onUserMessage as autoEvolveOnUserMessage,
+} from "../../skills/auto-evolve/index.js";
 import { resolveSystemPromptOverride } from "../../system-prompt-override.js";
 import { buildSystemPromptParams } from "../../system-prompt-params.js";
 import { buildSystemPromptReport } from "../../system-prompt-report.js";
@@ -145,12 +151,6 @@ import {
 import { buildEmbeddedSandboxInfo } from "../sandbox-info.js";
 import { prewarmSessionFile, trackSessionManagerAccess } from "../session-manager-cache.js";
 import { prepareSessionManagerForRun } from "../session-manager-init.js";
-import {
-  cleanupScratchpadDir,
-  ensureScratchpadDir,
-  isScratchpadEnabled,
-  resolveScratchpadDir,
-} from "../../scratchpad.js";
 import { resolveEmbeddedRunSkillEntries } from "../skills-runtime.js";
 import {
   describeEmbeddedAgentStreamStrategy,
@@ -228,11 +228,6 @@ import {
   selectCompactionTimeoutSnapshot,
   shouldFlagCompactionTimeout,
 } from "./compaction-timeout.js";
-import {
-  getSystemPromptAddendum,
-  onAgentReply as autoEvolveOnAgentReply,
-  onUserMessage as autoEvolveOnUserMessage,
-} from "../../skills/auto-evolve/index.js";
 import { pruneProcessedHistoryImages } from "./history-image-prune.js";
 import { detectAndLoadPromptImages } from "./images.js";
 import { buildAttemptReplayMetadata } from "./incomplete-turn.js";
@@ -495,6 +490,14 @@ export async function runEmbeddedAttempt(
     let abortSessionForYield: (() => void) | null = null;
     let queueYieldInterruptForSession: (() => void) | null = null;
     let yieldAbortSettled: Promise<void> | null = null;
+
+    // Mutable ref for prompt cache sharing: updated each turn with the current
+    // assistant message so fork subagents can inherit the parent's conversation prefix.
+    const parentTurnContext = {
+      assistantMessage: undefined as import("@mariozechner/pi-agent-core").AgentMessage | undefined,
+      systemPrompt: undefined as string | undefined,
+    };
+
     // Check if the model supports native image input
     const modelHasVision = params.model.input?.includes("image") ?? false;
     const toolsRaw = params.disableTools
@@ -557,6 +560,8 @@ export async function runEmbeddedAttempt(
               runAbortController.abort("sessions_yield");
               abortSessionForYield?.();
             },
+            parentAssistantMessage: () => parentTurnContext.assistantMessage,
+            parentSystemPrompt: () => parentTurnContext.systemPrompt,
           });
           if (params.toolsAllow && params.toolsAllow.length > 0) {
             const allowSet = new Set(params.toolsAllow);
@@ -748,9 +753,10 @@ export async function runEmbeddedAttempt(
     const isDefaultAgent = sessionAgentId === defaultAgentId;
     const promptMode = resolvePromptModeForSession(params.sessionKey);
 
-    // When toolsAllow is set, use minimal prompt and strip skills catalog
+    // When toolsAllow is set (fork child mode), use minimal prompt to reduce token usage
+    // but ALWAYS preserve skillsPrompt - fork workers need skill guidance regardless of tool restrictions
     const effectivePromptMode = params.toolsAllow?.length ? ("minimal" as const) : promptMode;
-    const effectiveSkillsPrompt = params.toolsAllow?.length ? undefined : skillsPrompt;
+    const effectiveSkillsPrompt = skillsPrompt;
     const docsPath = await resolveOpenClawDocsPath({
       workspaceDir: effectiveWorkspace,
       argv1: process.argv[1],
@@ -1714,6 +1720,13 @@ export async function runEmbeddedAttempt(
           }
         }
 
+        // Capture the final system prompt for prompt cache sharing.
+        // This is set once after all hooks/overrides are applied, as the system
+        // prompt is stable across turns within an attempt.
+        if (!parentTurnContext.systemPrompt) {
+          parentTurnContext.systemPrompt = systemPromptText;
+        }
+
         // Auto-evolve: match skills for this user message and inject context.
         const autoEvolveUserResult = await autoEvolveOnUserMessage({
           userMessage: effectivePrompt,
@@ -2126,6 +2139,10 @@ export async function runEmbeddedAttempt(
           .slice()
           .toReversed()
           .find((m) => m.role === "assistant");
+
+        // Update mutable ref for prompt cache sharing: fork subagents
+        // will read this via getter to inherit the parent's conversation prefix.
+        parentTurnContext.assistantMessage = lastAssistant;
         const currentAttemptAssistant = findCurrentAttemptAssistantMessage({
           messagesSnapshot,
           prePromptMessageCount,
@@ -2380,11 +2397,18 @@ export async function runEmbeddedAttempt(
             skillsConfig: params.config?.skills as Record<string, unknown> | undefined,
             spawnFn: buildSidecarSpawnFn(sessionAgentId),
             recentMessages: messagesSnapshot.slice(-20).flatMap((m) => {
-              if (m.role !== "user" && m.role !== "assistant") return [];
+              if (m.role !== "user" && m.role !== "assistant") {
+                return [];
+              }
               const text = Array.isArray(m.content)
-                ? m.content.filter((b: unknown) => (b as { type?: string }).type === "text").map((b: unknown) => (b as { text?: string }).text ?? "").join("")
-                : typeof m.content === "string" ? m.content : "";
-              return text.trim() ? [{ role: m.role as "user" | "assistant", content: text.slice(0, 2000) }] : [];
+                ? m.content
+                    .filter((b: unknown) => (b as { type?: string }).type === "text")
+                    .map((b: unknown) => (b as { text?: string }).text ?? "")
+                    .join("")
+                : typeof m.content === "string"
+                  ? m.content
+                  : "";
+              return text.trim() ? [{ role: m.role, content: text.slice(0, 2000) }] : [];
             }),
           }).catch((err) => {
             log.debug(`auto-evolve: post-reply hook skipped: ${String(err)}`);

@@ -71,7 +71,6 @@ export function readGlobalMemoryEntrypoint(stateDir: string): GlobalMemoryReadRe
   const entrypointPath = resolveGlobalMemoryEntrypoint(stateDir);
   let raw = "";
   try {
-    // eslint-disable-next-line custom-rules/no-sync-fs
     raw = fs.readFileSync(entrypointPath, { encoding: "utf-8" });
   } catch {
     // No global MEMORY.md yet — normal for new installations.
