@@ -4,6 +4,7 @@ import { callGateway } from "../../gateway/call.js";
 import { normalizeDeliveryContext } from "../../utils/delivery-context.js";
 import type { GatewayMessageChannel } from "../../utils/message-channel.js";
 import { isSpawnAcpAcceptedResult, spawnAcpDirect } from "../acp-spawn.js";
+import { isForkSubagentEnabled, spawnForkSubagent } from "../fork/index.js";
 import { optionalStringEnum } from "../schema/typebox.js";
 import type { SpawnedToolContext } from "../spawned-context.js";
 import { registerSubagentRun } from "../subagent-registry.js";
@@ -297,6 +298,46 @@ export function createSessionsSpawnTool(
           }
         }
         return jsonResult(result);
+      }
+
+      // Fork mode (default): bypasses Gateway pairing, in-process execution
+      if (isForkSubagentEnabled() && opts?.agentSessionKey && runtime === "subagent") {
+        try {
+          const forkResult = await spawnForkSubagent({
+            parentSessionKey: opts.agentSessionKey,
+            assistantMessage: {
+              role: "assistant",
+              content: [],
+            } as unknown as import("@mariozechner/pi-agent-core").AgentMessage,
+            taskId: `spawn-${Date.now()}`,
+            directive: task,
+            taskContext: label || undefined,
+            scratchpadDir: opts.scratchpadDir,
+            workspaceDir: opts.workspaceDir,
+            depth: 0,
+            model: modelOverride,
+            thinking: thinkingOverrideRaw,
+            priority: "medium",
+            timeoutMs: runTimeoutSeconds ? runTimeoutSeconds * 1000 : undefined,
+            announceOnComplete: true,
+          });
+
+          return jsonResult({
+            status: forkResult.success ? "accepted" : "error",
+            mode: "fork",
+            childSessionKey: forkResult.forkId ? `fork:${forkResult.forkId}` : undefined,
+            runId: forkResult.forkId,
+            outcome: forkResult.success
+              ? { status: "ok" as const, findings: forkResult.output }
+              : undefined,
+            error: forkResult.error,
+            executionMode: "fork",
+            announced: forkResult.announced,
+          });
+          // eslint-disable-next-line no-unused-vars
+        } catch (_) {
+          // Fork failed, fall through to legacy subagent path
+        }
       }
 
       const result = await spawnSubagentDirect(

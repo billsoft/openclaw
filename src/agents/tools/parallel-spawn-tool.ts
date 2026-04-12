@@ -1,4 +1,5 @@
 import { Type } from "@sinclair/typebox";
+import { isForkSubagentEnabled, spawnForkSubagents, parseForkOutput } from "../fork/index.js";
 import { executeParallelTasks } from "../subagent-parallel.js";
 import type {
   ParallelMergeResult,
@@ -11,12 +12,16 @@ import type { AnyAgentTool } from "./common.js";
 import { jsonResult, readNumberParam, readStringParam } from "./common.js";
 
 const PARALLEL_SPAWN_TOOL_DISPLAY_SUMMARY =
-  "Execute multiple sub-agents in parallel with automatic result merging";
+  "Execute multiple sub-agents in parallel with automatic result merging (fork mode by default)";
 
 function describeParallelSpawnTool(): string {
   return [
     "Decompose a complex task into multiple sub-tasks,",
     "execute them in parallel, and merge the results.",
+    "",
+    "**Execution Mode (auto-selected):**",
+    "- Fork mode (default, in-process): Bypasses Gateway pairing, uses prompt cache sharing via parent history cloning.",
+    "- Legacy subagent mode (fallback): Uses Gateway RPC with announce-based result delivery.",
     "",
     "⚠️ WARNING FOR COORDINATOR MODE ⚠️",
     "This tool is SYNCHRONOUS and BLOCKING. If you use it, you will hang and be unable to speak to the user until all tasks finish.",
@@ -65,6 +70,7 @@ const ParallelSpawnToolSchema = Type.Object({
       totalTimeoutMs: Type.Optional(Type.Number({ minimum: 10000 })),
       sharedContext: Type.Optional(Type.String()),
       lightContext: Type.Optional(Type.Boolean()),
+      useFork: Type.Optional(Type.Boolean()),
     }),
   ),
 });
@@ -130,17 +136,35 @@ export function createParallelSpawnTool(opts?: SpawnedToolContext): AnyAgentTool
       }));
 
       const rawConfig = params.config as Record<string, unknown> | undefined;
+      const maxConcurrency = Math.min(readNumberParam(rawConfig ?? {}, "maxConcurrency") ?? 3, 5);
+
+      const forceUseFork = rawConfig?.useFork === true;
+      const forkAvailable = isForkSubagentEnabled();
+
+      if ((forceUseFork || (!forceUseFork && forkAvailable)) && opts?.agentSessionKey) {
+        try {
+          return await executeViaFork(tasks, rawConfig, opts);
+        } catch (forkError) {
+          if (forceUseFork) {
+            return jsonResult({
+              status: "error",
+              error: `Fork execution failed: ${String(forkError)}`,
+            });
+          }
+        }
+      }
+
       const config: ParallelSpawnConfig & {
         spawnFn: (
           task: ParallelTaskDecomposition,
-          isolatedContext: import("../subagent-isolation.js").IsolatedSpawnContext
+          isolatedContext: import("../subagent-isolation.js").IsolatedSpawnContext,
         ) => Promise<{
           runId: string;
           outcome?: SubagentRunOutcome;
           error?: string;
         }>;
       } = {
-        maxConcurrency: Math.min(readNumberParam(rawConfig ?? {}, "maxConcurrency") ?? 3, 5),
+        maxConcurrency,
         mergeStrategy: (rawConfig?.mergeStrategy === "concatenate" ||
         rawConfig?.mergeStrategy === "structured" ||
         rawConfig?.mergeStrategy === "llm-summary"
@@ -205,6 +229,7 @@ export function createParallelSpawnTool(opts?: SpawnedToolContext): AnyAgentTool
 
         return jsonResult({
           status: "ok",
+          executionMode: "legacy-subagent",
           summary: mergeResult.summary,
           mergedContent:
             mergeResult.mergedContent.slice(0, 8000) +
@@ -230,6 +255,90 @@ export function createParallelSpawnTool(opts?: SpawnedToolContext): AnyAgentTool
       }
     },
   };
+}
+
+async function executeViaFork(
+  tasks: ParallelTaskDecomposition[],
+  rawConfig: Record<string, unknown> | undefined,
+  opts: SpawnedToolContext,
+) {
+  const timeoutPerTaskMs = readNumberParam(rawConfig ?? {}, "timeoutPerTaskMs");
+  const sharedContext = readStringParam(rawConfig ?? {}, "sharedContext");
+
+  const forkCtxs = tasks.map((task) => ({
+    parentSessionKey: opts.agentSessionKey!,
+    assistantMessage: {
+      role: "assistant" as const,
+      content: [],
+    } as unknown as import("@mariozechner/pi-agent-core").AgentMessage,
+    taskId: task.id,
+    directive: task.task,
+    taskContext: sharedContext ?? undefined,
+    scratchpadDir: opts.scratchpadDir,
+    workspaceDir: opts.workspaceDir,
+    depth: 0,
+    model: task.model,
+    thinking: task.thinking,
+    priority:
+      task.priority === "high" || task.priority === "medium" || task.priority === "low"
+        ? task.priority
+        : ("medium" as const),
+    timeoutMs: timeoutPerTaskMs,
+    announceOnComplete: false,
+  }));
+
+  const results = await spawnForkSubagents(forkCtxs);
+
+  const completed = results.filter((r: { success: boolean }) => r.success);
+  const failed = results.filter((r: { success: boolean }) => !r.success);
+
+  const structuredResults = results.map(
+    (r: {
+      taskId?: string;
+      output?: string;
+      status?: string;
+      durationMs?: number;
+      error?: string;
+    }) => ({
+      taskId: r.taskId ?? "unknown",
+      output: r.output ? parseForkOutput(r.output) : undefined,
+      rawOutput: r.output,
+      status: r.status ?? "failed",
+      durationMs: r.durationMs,
+      error: r.error,
+    }),
+  );
+
+  const mergedParts = completed
+    .map((r: { taskId?: string; output?: string }) => `[${r.taskId}]\n${r.output ?? "(no output)"}`)
+    .join("\n\n---\n\n");
+
+  return jsonResult({
+    status: "ok",
+    executionMode: "fork",
+    summary: `${completed.length}/${tasks.length} tasks completed via fork mode`,
+    mergedContent:
+      mergedParts.slice(0, 8000) + (mergedParts.length > 8000 ? "\n...[truncated]" : ""),
+    structuredResults,
+    taskCount: tasks.length,
+    completedCount: completed.length,
+    failedCount: failed.length,
+    taskDetails: results.map(
+      (r: {
+        taskId?: string;
+        status?: string;
+        durationMs?: number;
+        announced?: boolean;
+        error?: string;
+      }) => ({
+        taskId: r.taskId,
+        status: r.status,
+        durationMs: r.durationMs,
+        announced: r.announced,
+        error: r.error,
+      }),
+    ),
+  });
 }
 
 type MergeStrategy = "concatenate" | "structured" | "llm-summary";
