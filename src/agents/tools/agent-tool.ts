@@ -251,7 +251,10 @@ export function createAgentTool(opts?: SpawnedToolContext): AnyAgentTool {
           model: t.model,
           thinking: t.thinking,
           timeoutMs: t.timeout_seconds ? t.timeout_seconds * 1000 : undefined,
-          announceOnComplete: false, // inline result
+          // Always announce — if the 2-minute auto-background threshold fires these
+          // tasks will continue running silently and MUST announce via task-notification.
+          // In the fast-completion (inline) path the extra notification is harmless.
+          announceOnComplete: true,
           parentSystemPrompt: opts.parentSystemPrompt,
           // Inherit tool pool from parent for consistency
           toolsAllow: opts.toolsAllow,

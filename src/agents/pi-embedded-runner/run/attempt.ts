@@ -562,6 +562,7 @@ export async function runEmbeddedAttempt(
             },
             parentAssistantMessage: () => parentTurnContext.assistantMessage,
             parentSystemPrompt: () => parentTurnContext.systemPrompt,
+            toolsAllow: params.toolsAllow,
           });
           if (params.toolsAllow && params.toolsAllow.length > 0) {
             const allowSet = new Set(params.toolsAllow);
@@ -756,6 +757,10 @@ export async function runEmbeddedAttempt(
     // When toolsAllow is set (fork child mode), use minimal prompt to reduce token usage
     // but ALWAYS preserve skillsPrompt - fork workers need skill guidance regardless of tool restrictions
     const effectivePromptMode = params.toolsAllow?.length ? ("minimal" as const) : promptMode;
+    // Fork child guard: when toolsAllow is set the session is a fork worker.
+    // Auto-evolve writes to shared in-process state (evolvedSkillsMap) and skill files.
+    // Running it from parallel fork children causes data races and corrupts the skill store.
+    const isForkChild = (params.toolsAllow?.length ?? 0) > 0;
     const effectiveSkillsPrompt = skillsPrompt;
     const docsPath = await resolveOpenClawDocsPath({
       workspaceDir: effectiveWorkspace,
@@ -1728,12 +1733,16 @@ export async function runEmbeddedAttempt(
         }
 
         // Auto-evolve: match skills for this user message and inject context.
-        const autoEvolveUserResult = await autoEvolveOnUserMessage({
-          userMessage: effectivePrompt,
-          sessionId: params.sessionId,
-          managedSkillsDir,
-          skillsConfig: params.config?.skills as Record<string, unknown> | undefined,
-        }).catch(() => ({ matchedSkills: [], contextAddendum: "" }));
+        // Guard: skip for fork children (toolsAllow is set) to prevent shared-state races.
+        const autoEvolveUserResult =
+          !isForkChild
+            ? await autoEvolveOnUserMessage({
+                userMessage: effectivePrompt,
+                sessionId: params.sessionId,
+                managedSkillsDir,
+                skillsConfig: params.config?.skills as Record<string, unknown> | undefined,
+              }).catch(() => ({ matchedSkills: [], contextAddendum: "" }))
+            : { matchedSkills: [], contextAddendum: "" };
         if (autoEvolveUserResult.contextAddendum) {
           effectivePrompt = `${autoEvolveUserResult.contextAddendum}\n\n${effectivePrompt}`;
         }
@@ -2386,8 +2395,9 @@ export async function runEmbeddedAttempt(
         }
 
         // Auto-evolve: detect task completion and trigger skill extraction.
+        // Guard: skip for fork children to prevent concurrent skill file writes.
         const lastAssistantText = assistantTexts[assistantTexts.length - 1] ?? "";
-        if (lastAssistantText && !aborted && !promptError) {
+        if (lastAssistantText && !aborted && !promptError && !isForkChild) {
           void autoEvolveOnAgentReply({
             agentReplyText: lastAssistantText,
             sessionId: params.sessionId,

@@ -110,8 +110,7 @@ const FORK_CHILD_SYSTEM_DIRECTIVE = [
   "",
   "## SHARED RESOURCES (if available)",
   "- **Scratchpad**: If a scratchpad directory is provided, you can read/write files there to share intermediate results with other workers.",
-  "- **MCP Tools**: If MCP servers are connected, you can use their tools (database queries, API calls, etc.) alongside standard file tools.",
-  "- **Tool Restrictions**: You may only have access to a subset of tools. Use only what is available to you.",
+  "- **Tool Restrictions**: You may only have access to a subset of tools (e.g. read/write/exec). Use only what is listed in your available tools.",
   "",
   "## OUTPUT FORMAT (REQUIRED)",
   "Your response MUST follow this exact structure:",
@@ -528,6 +527,37 @@ export async function executeForkTask(
     timeoutController.signal,
   ]);
 
+  // Worktree isolation
+  const isolationMode = getForkIsolationMode();
+  const effectiveWorkspaceDir = task.workspaceDir ?? process.cwd();
+  let worktreeInfo: { path: string; name: string; isNew: boolean } | undefined;
+
+  if (isolationMode !== "none") {
+    try {
+      worktreeInfo = await createAgentWorktree({
+        repoPath: effectiveWorkspaceDir,
+        worktreeName: `fork-${task.id}`,
+      });
+      console.log(
+        `[fork-subagent] Worktree created for task ${task.id}: ${worktreeInfo.path} (isolation=${isolationMode})`,
+      );
+      task.workspaceDir = worktreeInfo.path;
+    } catch (wtErr) {
+      console.warn(
+        `[fork-subagent] Worktree creation failed for task ${task.id}, using parent workspace directly: ${wtErr instanceof Error ? wtErr.message : String(wtErr)}`,
+      );
+    }
+  }
+
+  try {
+    await import("node:fs").then((fs) => fs.promises.access(task.workspaceDir ?? process.cwd()));
+  } catch {
+    console.warn(
+      `[fork-subagent] Workspace dir not accessible: ${task.workspaceDir}, falling back to cwd`,
+    );
+    task.workspaceDir = process.cwd();
+  }
+
   // Start progress heartbeat
   progressId = setInterval(() => {
     hooks?.onLifecycleEvent?.({
@@ -642,6 +672,19 @@ export async function executeForkTask(
               : "cancelled";
           cleanupTimeout();
           cleanupProgress();
+
+          if (worktreeInfo?.isNew) {
+            try {
+              await removeAgentWorktree({
+                repoPath: effectiveWorkspaceDir,
+                worktreeName: `fork-${task.id}`,
+                force: true,
+              });
+            } catch {
+              // best effort cleanup
+            }
+          }
+
           return {
             status,
             taskId: task.id,
@@ -682,6 +725,18 @@ export async function executeForkTask(
 
         cleanupTimeout();
         cleanupProgress();
+
+        if (worktreeInfo?.isNew) {
+          try {
+            await removeAgentWorktree({
+              repoPath: effectiveWorkspaceDir,
+              worktreeName: `fork-${task.id}`,
+              force: true,
+            });
+          } catch {
+            // best effort cleanup
+          }
+        }
 
         const finalResult: ForkResult = {
           status,
@@ -726,6 +781,18 @@ export async function executeForkTask(
       result.retryCount = Math.max(0, tokenUsageHistory.length - 1);
     }
 
+    if (worktreeInfo?.isNew) {
+      try {
+        await removeAgentWorktree({
+          repoPath: effectiveWorkspaceDir,
+          worktreeName: `fork-${task.id}`,
+          force: true,
+        });
+      } catch {
+        // best effort cleanup
+      }
+    }
+
     hooks?.onLifecycleEvent?.({
       phase: result.status === "completed" ? "end" : "error",
       taskId: task.id,
@@ -742,6 +809,18 @@ export async function executeForkTask(
   } catch (err) {
     cleanupTimeout();
     cleanupProgress();
+
+    if (worktreeInfo?.isNew) {
+      try {
+        await removeAgentWorktree({
+          repoPath: effectiveWorkspaceDir,
+          worktreeName: `fork-${task.id}`,
+          force: true,
+        });
+      } catch {
+        // best effort cleanup
+      }
+    }
 
     const errorMsg = err instanceof Error ? err.message : String(err);
     const status: ForkResult["status"] =
@@ -850,12 +929,10 @@ async function executeViaEmbeddedRunner(
       ...(task.toolsAllow && task.toolsAllow.length > 0 ? { toolsAllow: task.toolsAllow } : {}),
       // extraSystemPrompt: parent's system prompt (for cache prefix sharing) +
       // fork child directive (only if the prompt doesn't already contain it).
-      extraSystemPrompt: [
-        task.parentSystemPrompt,
-        promptHasForkDirective ? undefined : FORK_CHILD_SYSTEM_DIRECTIVE,
-      ]
-        .filter(Boolean)
-        .join("\n\n") || undefined,
+      extraSystemPrompt:
+        [task.parentSystemPrompt, promptHasForkDirective ? undefined : FORK_CHILD_SYSTEM_DIRECTIVE]
+          .filter(Boolean)
+          .join("\n\n") || undefined,
     });
 
     const output = extractStructuredOutput(sessionResult);
@@ -897,13 +974,6 @@ async function executeViaSubprocess(
   );
 
   try {
-    const isolationMode = getForkIsolationMode();
-
-    const worktreeInfo = await createAgentWorktree({
-      repoPath: task.workspaceDir ?? process.cwd(),
-      worktreeName: `fork-${task.id}`,
-    });
-
     try {
       const { execFile } = await import("node:child_process");
       const { promisify } = await import("node:util");
@@ -938,7 +1008,7 @@ async function executeViaSubprocess(
           nodeBin,
           [cliEntry, "dev", "--eval", taskPrompt],
           {
-            cwd: worktreeInfo.path,
+            cwd: task.workspaceDir ?? process.cwd(),
             timeout: task.timeoutMs ?? resolveForkConfig().defaultTimeoutMs,
             maxBuffer: 10 * 1024 * 1024,
             signal: controller.signal,
@@ -960,21 +1030,27 @@ async function executeViaSubprocess(
           output: parseStructuredOutput(stdout),
           durationMs: Date.now() - startTime,
         };
+      } catch (err) {
+        if (err instanceof Error && err.name === "AbortError") {
+          return {
+            status: "cancelled",
+            taskId: task.id,
+            error: "Subprocess was aborted",
+            durationMs: Date.now() - startTime,
+          };
+        }
+        throw err;
       } finally {
         abortSignal.removeEventListener("abort", abortHandler);
       }
-    } finally {
-      if (worktreeInfo.isNew && isolationMode !== "none") {
-        try {
-          await removeAgentWorktree({
-            repoPath: task.workspaceDir ?? process.cwd(),
-            worktreeName: `fork-${task.id}`,
-            force: true,
-          });
-        } catch {
-          // best-effort cleanup
-        }
-      }
+    } catch (err) {
+      const errorMsg = err instanceof Error ? err.message : String(err);
+      return {
+        status: "failed",
+        taskId: task.id,
+        error: `Subprocess error: ${errorMsg}`,
+        durationMs: Date.now() - startTime,
+      };
     }
   } catch (err) {
     const errorMsg = err instanceof Error ? err.message : String(err);
