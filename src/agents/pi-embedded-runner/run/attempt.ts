@@ -812,53 +812,56 @@ export async function runEmbeddedAttempt(
         config: params.config,
         agentId: sessionAgentId,
       }) ??
-      buildEmbeddedSystemPrompt({
-        workspaceDir: effectiveWorkspace,
-        defaultThinkLevel: params.thinkLevel,
-        reasoningLevel: params.reasoningLevel ?? "off",
-        extraSystemPrompt: autoEvolveAddendum
-          ? [params.extraSystemPrompt, autoEvolveAddendum].filter(Boolean).join("\n\n")
-          : params.extraSystemPrompt,
-        ownerNumbers: params.ownerNumbers,
-        ownerDisplay: ownerDisplay.ownerDisplay,
-        ownerDisplaySecret: ownerDisplay.ownerDisplaySecret,
-        reasoningTagHint,
-        heartbeatPrompt,
-        skillsPrompt: effectiveSkillsPrompt,
-        docsPath: docsPath ?? undefined,
-        ttsHint,
-        workspaceNotes,
-        reactionGuidance,
-        promptMode: effectivePromptMode,
-        acpEnabled: params.config?.acp?.enabled !== false,
-        runtimeInfo,
-        messageToolHints,
-        sandboxInfo,
-        tools: effectiveTools,
-        modelAliasLines: buildModelAliasLines(params.config),
-        userTimezone,
-        userTime,
-        userTimeFormat,
-        contextFiles,
-        includeMemorySection: !params.contextEngine || params.contextEngine.info.id === "legacy",
-        memoryCitationsMode: params.config?.memory?.citations,
-        sessionMemoryContent:
-          (await getSessionMemoryContent(
-            params.agentDir ?? resolveOpenClawAgentDir(),
-            params.sessionId,
-          ).catch(() => undefined)) ?? undefined,
-        promptContribution,
-        // Coordinator mode: only inject for main agents (non-subagent, non-cron sessions)
-        coordinatorMode:
-          effectivePromptMode === "full" &&
-          params.config?.agents?.defaults?.coordinator?.enabled === true
-            ? {
-                enabled: true,
-                scratchpadDir: params.config?.agents?.defaults?.coordinator?.scratchpadDir,
-                maxWorkers: params.config?.agents?.defaults?.coordinator?.maxWorkers,
-              }
-            : undefined,
-      });
+      (params.parentSystemPrompt && params.extraSystemPrompt
+        ? params.extraSystemPrompt
+        : buildEmbeddedSystemPrompt({
+            workspaceDir: effectiveWorkspace,
+            defaultThinkLevel: params.thinkLevel,
+            reasoningLevel: params.reasoningLevel ?? "off",
+            extraSystemPrompt: autoEvolveAddendum
+              ? [params.extraSystemPrompt, autoEvolveAddendum].filter(Boolean).join("\n\n")
+              : params.extraSystemPrompt,
+            ownerNumbers: params.ownerNumbers,
+            ownerDisplay: ownerDisplay.ownerDisplay,
+            ownerDisplaySecret: ownerDisplay.ownerDisplaySecret,
+            reasoningTagHint,
+            heartbeatPrompt,
+            skillsPrompt: effectiveSkillsPrompt,
+            docsPath: docsPath ?? undefined,
+            ttsHint,
+            workspaceNotes,
+            reactionGuidance,
+            promptMode: effectivePromptMode,
+            acpEnabled: params.config?.acp?.enabled !== false,
+            runtimeInfo,
+            messageToolHints,
+            sandboxInfo,
+            tools: effectiveTools,
+            modelAliasLines: buildModelAliasLines(params.config),
+            userTimezone,
+            userTime,
+            userTimeFormat,
+            contextFiles,
+            includeMemorySection:
+              !params.contextEngine || params.contextEngine.info.id === "legacy",
+            memoryCitationsMode: params.config?.memory?.citations,
+            sessionMemoryContent:
+              (await getSessionMemoryContent(
+                params.agentDir ?? resolveOpenClawAgentDir(),
+                params.sessionId,
+              ).catch(() => undefined)) ?? undefined,
+            promptContribution,
+            // Coordinator mode: only inject for main agents (non-subagent, non-cron sessions)
+            coordinatorMode:
+              effectivePromptMode === "full" &&
+              params.config?.agents?.defaults?.coordinator?.enabled === true
+                ? {
+                    enabled: true,
+                    scratchpadDir: params.config?.agents?.defaults?.coordinator?.scratchpadDir,
+                    maxWorkers: params.config?.agents?.defaults?.coordinator?.maxWorkers,
+                  }
+                : undefined,
+          }));
     const systemPromptReport = buildSystemPromptReport({
       source: "run",
       generatedAt: Date.now(),
@@ -1734,15 +1737,14 @@ export async function runEmbeddedAttempt(
 
         // Auto-evolve: match skills for this user message and inject context.
         // Guard: skip for fork children (toolsAllow is set) to prevent shared-state races.
-        const autoEvolveUserResult =
-          !isForkChild
-            ? await autoEvolveOnUserMessage({
-                userMessage: effectivePrompt,
-                sessionId: params.sessionId,
-                managedSkillsDir,
-                skillsConfig: params.config?.skills as Record<string, unknown> | undefined,
-              }).catch(() => ({ matchedSkills: [], contextAddendum: "" }))
-            : { matchedSkills: [], contextAddendum: "" };
+        const autoEvolveUserResult = !isForkChild
+          ? await autoEvolveOnUserMessage({
+              userMessage: effectivePrompt,
+              sessionId: params.sessionId,
+              managedSkillsDir,
+              skillsConfig: params.config?.skills as Record<string, unknown> | undefined,
+            }).catch(() => ({ matchedSkills: [], contextAddendum: "" }))
+          : { matchedSkills: [], contextAddendum: "" };
         if (autoEvolveUserResult.contextAddendum) {
           effectivePrompt = `${autoEvolveUserResult.contextAddendum}\n\n${effectivePrompt}`;
         }

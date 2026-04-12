@@ -320,6 +320,11 @@ export type ForkResult = {
 export type ForkTaskConfig = {
   id: string;
   directive: string;
+  /**
+   * Identifies the parent conversation turn (e.g. runId) that spawned this fork.
+   * Prevents task scope bleed by isolating tasks to specific conversation turns.
+   */
+  conversationTurnId?: string;
   taskContext?: string;
   priority?: "high" | "medium" | "low";
   dependencies?: string[];
@@ -599,6 +604,7 @@ export async function executeForkTask(
               forkMessages,
               combinedAbort,
               runnerModule,
+              hooks,
             );
           } else {
             result = await executeViaSubprocess(task, combinedAbort);
@@ -847,6 +853,7 @@ async function executeViaEmbeddedRunner(
   forkMessages: AgentMessage[],
   abortSignal: AbortSignal,
   runnerModule: unknown,
+  hooks?: ForkExecutionHooks,
 ): Promise<ForkResult> {
   const startTime = Date.now();
 
@@ -864,6 +871,13 @@ async function executeViaEmbeddedRunner(
     ) => Promise<Record<string, unknown>>;
 
     const childSessionKey = `agent:fork:${task.id}:${crypto.randomUUID()}`;
+
+    // Let the registry know the child session key for message injection
+    hooks?.onLifecycleEvent?.({
+      phase: "progress",
+      taskId: task.id,
+      data: { childSessionKey },
+    });
 
     // Convert forkMessages (array of AgentMessage) to a flat prompt string.
     // The embedded runner expects `prompt` as a string, not a messages array.
@@ -927,6 +941,7 @@ async function executeViaEmbeddedRunner(
       trigger: "manual" as const,
       // Inherit tool pool from parent when available (ensures consistency)
       ...(task.toolsAllow && task.toolsAllow.length > 0 ? { toolsAllow: task.toolsAllow } : {}),
+      parentSystemPrompt: task.parentSystemPrompt,
       // extraSystemPrompt: parent's system prompt (for cache prefix sharing) +
       // fork child directive (only if the prompt doesn't already contain it).
       extraSystemPrompt:

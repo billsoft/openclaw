@@ -15,19 +15,21 @@
 
 import type { AgentToolResult } from "@mariozechner/pi-agent-core";
 import { Type } from "@sinclair/typebox";
-import { isForkSubagentEnabled } from "../fork/fork-subagent-core.js";
 import {
   getForkRegistry,
-  getForkStatus,
   getForksForParent,
   cancelFork,
+  isForkSubagentEnabled,
   type ForkSession,
 } from "../fork/index.js";
+import { loadSessionEntryByKey } from "../subagent-announce-delivery.js";
+import { queueEmbeddedPiMessage } from "../subagent-announce-delivery.runtime.js";
 import type { AnyAgentTool } from "./common.js";
 import { jsonResult, readStringParam, ToolInputError } from "./common.js";
 
 type SendMessageToolContext = {
   agentSessionKey?: string;
+  runId?: string;
 };
 
 interface WorkerMessage {
@@ -133,7 +135,7 @@ export function createSendMessageTool(opts?: SendMessageToolContext): AnyAgentTo
         const registry = getForkRegistry();
 
         if (taskId === "all" || taskId === "*") {
-          return await handleBroadcast(registry, opts.agentSessionKey, message, messageType);
+          return await handleBroadcast(registry, opts.agentSessionKey, message, messageType, opts);
         }
 
         return await handleSingleWorker(
@@ -142,6 +144,7 @@ export function createSendMessageTool(opts?: SendMessageToolContext): AnyAgentTo
           taskId,
           message,
           messageType as WorkerMessage["type"],
+          opts,
         );
       } catch (err) {
         const errorMsg = err instanceof Error ? err.message : String(err);
@@ -163,28 +166,25 @@ async function handleSingleWorker(
   taskId: string,
   message: string,
   type: WorkerMessage["type"],
+  opts: SendMessageToolContext,
 ): Promise<AgentToolResult<unknown>> {
-  const fork = getForkStatus(taskId);
+  const parentForks = getForksForParent(sessionKey);
+  const matchingFork = parentForks.find(
+    (f: ForkSession) =>
+      (f.taskId.includes(taskId) || taskId.includes(f.taskId)) &&
+      (opts?.runId ? f.conversationTurnId === opts.runId : true),
+  );
 
-  if (!fork) {
-    const parentForks = getForksForParent(sessionKey);
-    const matchingFork = parentForks.find(
-      (f: ForkSession) => f.taskId.includes(taskId) || taskId.includes(f.taskId),
-    );
-
-    if (!matchingFork) {
-      return jsonResult({
-        success: false,
-        taskId,
-        error: `Task "${taskId}" not found. It may have completed, failed, or the ID is incorrect. Use task_id='all' to list active tasks.`,
-        workerStatus: "not_found",
-      });
-    }
-
-    return jsonResult(processMessage(matchingFork, sessionKey, message, type));
+  if (!matchingFork) {
+    return jsonResult({
+      success: false,
+      taskId,
+      error: `Task "${taskId}" not found in current conversation turn. It may have completed, failed, or belongs to a different turn.`,
+      workerStatus: "not_found",
+    });
   }
 
-  return jsonResult(processMessage(fork, sessionKey, message, type));
+  return jsonResult(processMessage(matchingFork, sessionKey, message, type));
 }
 
 async function handleBroadcast(
@@ -192,9 +192,12 @@ async function handleBroadcast(
   sessionKey: string,
   message: string,
   type: string,
+  opts: SendMessageToolContext,
 ): Promise<AgentToolResult<unknown>> {
   const activeForks = getForksForParent(sessionKey).filter(
-    (f: ForkSession) => f.status === "running" || f.status === "pending",
+    (f: ForkSession) =>
+      (f.status === "running" || f.status === "pending") &&
+      (opts?.runId ? f.conversationTurnId === opts.runId : true),
   );
 
   if (activeForks.length === 0) {
@@ -364,14 +367,31 @@ function handleIntervention(fork: ForkSession, msg: WorkerMessage): Record<strin
       `For urgent changes, consider cancelling and re-spawning the task.`,
   );
 
+  let injected = false;
+  if (fork.childSessionKey) {
+    try {
+      const entry = loadSessionEntryByKey(fork.childSessionKey);
+      if (entry?.sessionId) {
+        const injectedMessage = `[Coordinator ${msg.type === "context_update" ? "Context Update" : "Intervention"}]: ${msg.message}`;
+        injected = queueEmbeddedPiMessage(entry.sessionId, injectedMessage);
+      }
+    } catch (e) {
+      console.warn(
+        `[send-message] Failed to inject message into embedded session ${fork.childSessionKey}`,
+        e,
+      );
+    }
+  }
+
   return {
     success: true,
     taskId: fork.taskId,
     workerStatus: fork.status,
     messageDelivered: true, // Message is recorded in registry
-    messageReceivedByWorker: false, // Worker has not actively received it yet
-    response:
-      msg.type === "intervention"
+    messageReceivedByWorker: injected,
+    response: injected
+      ? `Message successfully injected into running worker "${fork.taskId}".`
+      : msg.type === "intervention"
         ? `Intervention recorded for task "${fork.taskId}". The intervention is persisted in the task's lifecycle events. NOTE: The worker runs independently and may not see this message until it finishes its current operation. For urgent changes, use 'cancel' then re-spawn the task.`
         : `Context update recorded for task "${fork.taskId}". The new information is persisted and will be available when the worker checks its lifecycle events (if implemented).`,
   };

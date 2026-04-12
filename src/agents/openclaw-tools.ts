@@ -110,6 +110,8 @@ export function createOpenClawTools(
     onYield?: (message: string) => Promise<void> | void;
     /** Allow plugin tools for this tool set to late-bind the gateway subagent. */
     allowGatewaySubagentBinding?: boolean;
+    /** Optional tool allow-list inherited from parent agent context. */
+    toolsAllow?: string[];
   } & SpawnedToolContext,
 ): AnyAgentTool[] {
   const resolvedConfig = options?.config ?? openClawToolsDeps.config;
@@ -309,6 +311,9 @@ export function createOpenClawTools(
       requesterAgentIdOverride: options?.requesterAgentIdOverride,
       workspaceDir: spawnWorkspaceDir,
       scratchpadDir,
+      parentAssistantMessage: options?.parentAssistantMessage,
+      parentSystemPrompt: options?.parentSystemPrompt,
+      toolsAllow: options?.toolsAllow,
     }),
     createSendMessageTool({
       agentSessionKey: options?.agentSessionKey,

@@ -306,6 +306,10 @@ export function createOpenClawCodingTools(options?: {
    * ensuring byte-identical API request prefixes with the parent.
    */
   parentSystemPrompt?: string | (() => string | undefined);
+  /**
+   * Optional tool allow-list inherited from parent agent context.
+   */
+  toolsAllow?: string[];
 }): AnyAgentTool[] {
   const execToolName = "exec";
   const sandbox = options?.sandbox?.enabled ? options.sandbox : undefined;
@@ -583,6 +587,7 @@ export function createOpenClawCodingTools(options?: {
       allowGatewaySubagentBinding: options?.allowGatewaySubagentBinding,
       parentAssistantMessage: options?.parentAssistantMessage,
       parentSystemPrompt: options?.parentSystemPrompt,
+      toolsAllow: options?.toolsAllow,
     }),
   ];
   const toolsForMemoryFlush =

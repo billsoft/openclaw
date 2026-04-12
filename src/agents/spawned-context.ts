@@ -31,6 +31,11 @@ export type SpawnedToolContext = {
    * ensuring byte-identical API request prefixes with the parent.
    */
   parentSystemPrompt?: string | (() => string | undefined);
+  /**
+   * Identifies the current turn (e.g. runId) of the parent agent.
+   * Used to isolate fork workers to the conversation turn that spawned them.
+   */
+  runId?: string;
 };
 
 export type NormalizedSpawnedRunMetadata = {

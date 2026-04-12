@@ -12,11 +12,9 @@ import {
   FORK_BOILERPLATE_TAG,
   NEVER_ABORT_CONTROLLER,
   buildForkedMessages,
-  getForkIsolationMode,
   type ForkResult,
   type ForkExecutionHooks,
 } from "./fork-subagent-core.js";
-import { createAgentWorktree, removeAgentWorktree } from "./fork-worktree.js";
 
 let cleanupStarted = false;
 
@@ -295,6 +293,7 @@ export interface ForkSpawnContext {
   assistantMessage: AgentMessage;
   taskId: string;
   directive: string;
+  conversationTurnId?: string;
   taskContext?: string;
   scratchpadDir?: string;
   workspaceDir?: string;
@@ -413,6 +412,11 @@ export async function spawnForkSubagent(ctx: ForkSpawnContext): Promise<ForkSpaw
   const hooks: ForkExecutionHooks = {
     onLifecycleEvent: (evt) => {
       registry.recordLifecycleEvent(forkSession.forkId, evt);
+      if (evt.data?.childSessionKey) {
+        registry.updateForkStatus(forkSession.forkId, forkSession.status, {
+          childSessionKey: evt.data.childSessionKey as string,
+        });
+      }
     },
     onComplete: async (result) => {
       registry.updateForkStatus(forkSession.forkId, result.status as ForkSession["status"], {
@@ -479,38 +483,7 @@ export async function spawnForkSubagent(ctx: ForkSpawnContext): Promise<ForkSpaw
     ctx.parentAbortSignal ?? NEVER_ABORT_CONTROLLER.signal,
   ]);
 
-  // Worktree isolation: create isolated working directory when enabled
-  const isolationMode = getForkIsolationMode();
-  let worktreeInfo: { path: string; name: string; isNew: boolean } | undefined;
   const effectiveWorkspaceDir = ctx.workspaceDir ?? process.cwd();
-
-  if (isolationMode !== "none") {
-    try {
-      worktreeInfo = await createAgentWorktree({
-        repoPath: effectiveWorkspaceDir,
-        worktreeName: `fork-${ctx.taskId}`,
-      });
-      console.log(
-        `[fork-spawn] Worktree created for task ${ctx.taskId}: ${worktreeInfo.path} (isolation=${isolationMode})`,
-      );
-    } catch (wtErr) {
-      worktreeInfo = undefined;
-      console.warn(
-        `[fork-spawn] Worktree creation failed for task ${ctx.taskId}, using parent workspace directly (no isolation): ${wtErr instanceof Error ? wtErr.message : String(wtErr)}`,
-      );
-    }
-  }
-
-  // Validate that the resolved workspace dir actually exists and is accessible
-  const resolvedWorkspaceDir = worktreeInfo?.path ?? effectiveWorkspaceDir;
-  try {
-    await import("node:fs").then((fs) => fs.promises.access(resolvedWorkspaceDir));
-  } catch {
-    console.warn(
-      `[fork-spawn] Workspace dir not accessible: ${resolvedWorkspaceDir}, falling back to cwd`,
-    );
-    // Will use process.cwd() as final fallback in executeForkTask
-  }
 
   try {
     const result = await executeForkTask(
@@ -524,7 +497,7 @@ export async function spawnForkSubagent(ctx: ForkSpawnContext): Promise<ForkSpaw
         parentSessionKey: ctx.parentSessionKey,
         model: ctx.model,
         thinking: ctx.thinking,
-        workspaceDir: worktreeInfo?.path ?? effectiveWorkspaceDir,
+        workspaceDir: effectiveWorkspaceDir,
         scratchpadDir: isolatedCtx.taskScratchDir,
         parentSystemPrompt:
           typeof ctx.parentSystemPrompt === "function"
@@ -537,19 +510,6 @@ export async function spawnForkSubagent(ctx: ForkSpawnContext): Promise<ForkSpaw
       combinedSignal,
       hooks,
     );
-
-    // Cleanup worktree if no changes (best-effort)
-    if (worktreeInfo?.isNew) {
-      try {
-        await removeAgentWorktree({
-          repoPath: effectiveWorkspaceDir,
-          worktreeName: `fork-${ctx.taskId}`,
-          force: true,
-        });
-      } catch {
-        // best-effort cleanup
-      }
-    }
 
     return {
       success: result.status === "completed",
@@ -565,19 +525,6 @@ export async function spawnForkSubagent(ctx: ForkSpawnContext): Promise<ForkSpaw
     };
   } catch (err) {
     const errorMsg = err instanceof Error ? err.message : String(err);
-
-    // Cleanup worktree on error
-    if (worktreeInfo?.isNew) {
-      try {
-        await removeAgentWorktree({
-          repoPath: effectiveWorkspaceDir,
-          worktreeName: `fork-${ctx.taskId}`,
-          force: true,
-        });
-      } catch {
-        // best-effort cleanup
-      }
-    }
 
     registry.updateForkStatus(forkSession.forkId, "failed", { error: errorMsg });
     registry.recordLifecycleEvent(forkSession.forkId, {

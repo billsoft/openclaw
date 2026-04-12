@@ -254,10 +254,11 @@ export function createAgentTool(opts?: SpawnedToolContext): AnyAgentTool {
           // Always announce — if the 2-minute auto-background threshold fires these
           // tasks will continue running silently and MUST announce via task-notification.
           // In the fast-completion (inline) path the extra notification is harmless.
-          announceOnComplete: true,
+          announceOnComplete: false, // inline result
           parentSystemPrompt: opts.parentSystemPrompt,
           // Inherit tool pool from parent for consistency
           toolsAllow: opts.toolsAllow,
+          conversationTurnId: opts.runId,
         }));
 
         // Execute with auto-background timeout: if total execution exceeds the
@@ -382,6 +383,7 @@ export function createAgentTool(opts?: SpawnedToolContext): AnyAgentTool {
         parentSystemPrompt: opts.parentSystemPrompt,
         // Inherit tool pool from parent for consistency
         toolsAllow: opts.toolsAllow,
+        conversationTurnId: opts.runId,
       };
 
       void spawnForkSubagent(ctx).catch((err) => {

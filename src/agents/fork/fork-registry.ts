@@ -21,6 +21,10 @@ export interface ForkLifecycleEvent {
 export interface ForkSession {
   forkId: string;
   parentSessionKey: string;
+  /** Identifies the parent conversation turn (e.g. runId) that spawned this fork. Prevents task scope bleed. */
+  conversationTurnId?: string;
+  /** The session key of the child embedded runner (if running in-process). Used for message injection. */
+  childSessionKey?: string;
   taskId: string;
   status: ForkSessionStatus;
   depth?: number;
@@ -64,6 +68,7 @@ class ForkRegistry {
   registerFork(params: {
     parentSessionKey: string;
     taskId: string;
+    conversationTurnId?: string;
     cacheKey?: string;
     depth?: number;
   }): ForkSession {
@@ -77,6 +82,7 @@ class ForkRegistry {
     const session: ForkSession = {
       forkId,
       parentSessionKey: params.parentSessionKey,
+      conversationTurnId: params.conversationTurnId,
       taskId: params.taskId,
       status: "pending",
       createdAt: now,

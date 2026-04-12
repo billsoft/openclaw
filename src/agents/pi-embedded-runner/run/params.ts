@@ -115,6 +115,8 @@ export type RunEmbeddedPiAgentParams = {
   lane?: string;
   enqueue?: typeof enqueueCommand;
   extraSystemPrompt?: string;
+  /** Complete parent system prompt for prefix cache sharing */
+  parentSystemPrompt?: string;
   internalEvents?: AgentInternalEvent[];
   inputProvenance?: InputProvenance;
   streamParams?: AgentStreamParams;
