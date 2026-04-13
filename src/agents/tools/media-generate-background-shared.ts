@@ -145,7 +145,7 @@ export function completeMediaGenerationTaskRun(params: {
     return;
   }
   const endedAt = Date.now();
-  const target = params.count === 1 ? params.paths[0] : `${params.count} files`;
+  const target = params.count === 1 && params.paths.length > 0 ? params.paths[0] : `${params.count} files`;
   completeTaskRunByRunId({
     runId: params.handle.runId,
     runtime: "cli",

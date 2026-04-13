@@ -109,3 +109,41 @@ openclaw gateway install --port 18789
 
 ### 启动延迟不是失败
 Gateway 启动后需要 20-30 秒才能响应 HTTP 请求（飞书等通道建立 WebSocket 连接占用时间）。日志显示 `ready` 后不代表立即可用，这是正常现象。
+
+### 正确部署流程（重要！）
+
+**修改代码后部署到生产环境的正确步骤**：
+
+```bash
+# 1. 修改代码（已完成）
+
+# 2. 重新编译（必须！）
+cd /Volumes/D\ 1/code/openclaw
+pnpm build
+
+# 3. 验证dist目录有内容
+ls -la dist/
+
+# 4. 重启Gateway服务（不是install！）
+openclaw gateway restart
+
+# 5. 等待约30秒后验证端口
+lsof -i:18789
+```
+
+**常见错误**：
+- ❌ 只执行 `openclaw gateway install` 而不先编译 → dist变空，Gateway用旧代码
+- ❌ 直接 kill 进程而不重启 → 服务中断
+- ✅ 先 `pnpm build` 再 `openclaw gateway restart`
+
+**Gateway 服务管理**：
+```bash
+openclaw gateway status   # 查看状态
+openclaw gateway start   # 启动
+openclaw gateway stop    # 停止
+openclaw gateway restart  # 重启（推荐）
+openclaw gateway install --port 18789  # 仅用于首次安装或端口变更
+```
+
+**launchd 服务位置**：`~/Library/LaunchAgents/ai.openclaw.gateway.plist`
+**日志位置**：`~/.openclaw/logs/gateway.log`

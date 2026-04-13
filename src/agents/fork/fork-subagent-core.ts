@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import path from "node:path";
 import type { AgentMessage } from "@mariozechner/pi-agent-core";
 import { loadConfig } from "../../config/config.js";
 import { createAgentWorktree, removeAgentWorktree } from "./fork-worktree.js";
@@ -932,17 +933,24 @@ async function executeViaEmbeddedRunner(
     const promptText = promptParts.join("\n\n");
     const promptHasForkDirective = promptText.includes(FORK_BOILERPLATE_TAG);
 
+    const forkSessionId = `fork-${task.id}-${Date.now()}`;
+    const forkWorkspaceDir = task.workspaceDir ?? process.cwd();
+
     const sessionResult = await runEmbeddedPiAgent({
       sessionKey: childSessionKey,
+      sessionId: forkSessionId,
+      sessionFile: path.join(forkWorkspaceDir, `${forkSessionId}.jsonl`),
+      runId: forkSessionId,
       prompt: promptText,
       mode: "run",
       model: task.model,
       provider: task.provider,
       thinking: task.thinking,
-      workspaceDir: task.workspaceDir ?? process.cwd(),
+      workspaceDir: forkWorkspaceDir,
       sandbox: useSandbox,
       abortSignal,
       trigger: "manual" as const,
+      timeoutMs: task.timeoutMs ?? 300_000,
       // Inherit tool pool from parent when available (ensures consistency)
       ...(task.toolsAllow && task.toolsAllow.length > 0 ? { toolsAllow: task.toolsAllow } : {}),
       // extraSystemPrompt: parent's system prompt (for cache prefix sharing) +
