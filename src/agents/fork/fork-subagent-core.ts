@@ -1,7 +1,7 @@
 import crypto from "node:crypto";
-import path from "node:path";
 import type { AgentMessage } from "@mariozechner/pi-agent-core";
 import { loadConfig } from "../../config/config.js";
+import { resolveSessionTranscriptPath } from "../../config/sessions/paths.js";
 import { createAgentWorktree, removeAgentWorktree } from "./fork-worktree.js";
 
 export const FORK_ENABLED = process.env.OPENCLAW_ENABLE_FORK_SUBAGENT !== "0";
@@ -933,24 +933,29 @@ async function executeViaEmbeddedRunner(
     const promptText = promptParts.join("\n\n");
     const promptHasForkDirective = promptText.includes(FORK_BOILERPLATE_TAG);
 
-    const forkSessionId = `fork-${task.id}-${Date.now()}`;
-    const forkWorkspaceDir = task.workspaceDir ?? process.cwd();
+    // Derive required session fields for the embedded runner.
+    // sessionId: stable per task (same across retries for consistent transcript path)
+    // sessionFile: path where the session transcript is stored
+    // runId: unique per run attempt (used for logging / ACP lifecycle events)
+    // timeoutMs: required by RunEmbeddedPiAgentParams; falls back to default 5-min
+    const sessionId = `fork-${task.id}`;
+    const sessionFile = resolveSessionTranscriptPath(sessionId);
+    const runId = `${task.id}-${Date.now()}`;
+    const timeoutMs = task.timeoutMs ?? DEFAULT_FORK_TIMEOUT_MS;
 
     const sessionResult = await runEmbeddedPiAgent({
+      sessionId,
+      sessionFile,
+      runId,
+      timeoutMs,
       sessionKey: childSessionKey,
-      sessionId: forkSessionId,
-      sessionFile: path.join(forkWorkspaceDir, `${forkSessionId}.jsonl`),
-      runId: forkSessionId,
       prompt: promptText,
-      mode: "run",
       model: task.model,
       provider: task.provider,
       thinking: task.thinking,
-      workspaceDir: forkWorkspaceDir,
-      sandbox: useSandbox,
+      workspaceDir: task.workspaceDir ?? process.cwd(),
       abortSignal,
       trigger: "manual" as const,
-      timeoutMs: task.timeoutMs ?? 300_000,
       // Inherit tool pool from parent when available (ensures consistency)
       ...(task.toolsAllow && task.toolsAllow.length > 0 ? { toolsAllow: task.toolsAllow } : {}),
       // extraSystemPrompt: parent's system prompt (for cache prefix sharing) +

@@ -1,12 +1,14 @@
 import type { AgentMessage } from "@mariozechner/pi-agent-core";
 // Import internal event system for notification delivery (avoids Gateway pairing)
-import { queueEmbeddedPiMessage } from "../subagent-announce-delivery.runtime.js";
+import {
+  queueEmbeddedPiMessage,
+  resolveActiveEmbeddedRunSessionId,
+} from "../subagent-announce-delivery.runtime.js";
 import { createIsolatedSpawnContext } from "../subagent-isolation.js";
 import { getForkRegistry, startForkRegistryCleanup, type ForkSession } from "./fork-registry.js";
 import {
   executeForkTask,
   isForkSubagentEnabled,
-  isForkExecutionActive,
   resolveForkConfig,
   checkForkDepthLimits,
   FORK_BOILERPLATE_TAG,
@@ -159,24 +161,26 @@ async function deliverNotificationWithRetry(
 
   let lastError: string | undefined;
 
+  // Resolve parent sessionId once (outside retry loop — it doesn't change between retries).
+  // Use the authoritative in-process lookup (ACTIVE_EMBEDDED_RUN_SESSION_IDS_BY_KEY) rather
+  // than fragile regex extraction, since session key formats vary by channel/agent.
+  const parentSessionId = resolveActiveEmbeddedRunSessionId(parentSessionKey);
+
   // Strategy 1: Try internal event system first (no Gateway pairing required)
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     try {
       const message = buildNotificationMessage({ ...payload, retryCount: attempt });
 
-      // Parse sessionId from sessionKey
-      const sessionId = parseSessionIdFromKey(parentSessionKey);
-
-      if (sessionId) {
+      if (parentSessionId) {
         // Use internal event queue - no Gateway connection needed
-        const steered = queueEmbeddedPiMessage(sessionId, message);
+        const steered = queueEmbeddedPiMessage(parentSessionId, message);
         if (steered) {
           notificationTracker.confirmDelivery(payload.taskId);
           return { delivered: true, retryCount: attempt };
         }
         lastError = `Internal event queue rejected message (attempt ${attempt + 1})`;
       } else {
-        lastError = `Failed to parse sessionId from parentSessionKey: ${parentSessionKey.slice(0, 50)}...`;
+        lastError = `Parent session not found in active runs for key: ${parentSessionKey.slice(0, 50)}...`;
       }
 
       // If steer failed and not last attempt, wait and retry
@@ -243,29 +247,6 @@ async function deliverNotificationWithRetry(
     error: finalError,
     retryCount: MAX_RETRIES,
   };
-}
-
-/**
- * Parse sessionId from sessionKey for internal event delivery
- */
-function parseSessionIdFromKey(sessionKey: string): string | undefined {
-  // Try to extract sessionId from various formats
-  const match1 = sessionKey.match(/session:([^:]+)/);
-  if (match1) {
-    return match1[1];
-  }
-
-  const match2 = sessionKey.match(/:session:([^:]+)/);
-  if (match2) {
-    return match2[1];
-  }
-
-  const match3 = sessionKey.match(/session-([^\s:]+)/);
-  if (match3) {
-    return match3[1];
-  }
-
-  return undefined;
 }
 
 function buildNotificationMessage(payload: NotificationPayload): string {
@@ -335,17 +316,6 @@ export async function spawnForkSubagent(ctx: ForkSpawnContext): Promise<ForkSpaw
       success: false,
       taskId: ctx.taskId,
       error: "Fork subagent is disabled (OPENCLAW_ENABLE_FORK_SUBAGENT=0)",
-    };
-  }
-
-  // Recursion guard: fork children must not spawn nested forks (same as claude-code's isInForkChild check).
-  // isForkExecutionActive() is true whenever this process is currently inside an executeForkTask() call.
-  if (isForkExecutionActive()) {
-    return {
-      success: false,
-      taskId: ctx.taskId,
-      error:
-        "Fork nesting is not allowed. You are already running inside a fork worker. Execute tasks directly instead of spawning nested agents.",
     };
   }
 

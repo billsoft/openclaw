@@ -16,7 +16,6 @@
 
 import { Type } from "@sinclair/typebox";
 import {
-  isForkExecutionActive,
   isForkSubagentEnabled,
   spawnForkSubagent,
   spawnForkSubagents,
@@ -210,8 +209,14 @@ export function createAgentTool(opts?: SpawnedToolContext): AnyAgentTool {
       // Inherit model configuration from parent session (ensures fork workers use the same model/provider)
       const inheritedModel = resolveParentModel(opts?.agentSessionKey);
 
-      // Recursion guard: fork children cannot spawn nested agents
-      if (isForkExecutionActive()) {
+      // Recursion guard: fork children cannot spawn nested agents.
+      // Use toolsAllow to detect fork-child context rather than the global forkExecutionDepth
+      // counter, which would incorrectly block the parent from launching a second wave of
+      // workers while earlier ones are still running (false positive concurrency block).
+      // toolsAllow is only set on fork children (inherited from parent); parent sessions
+      // never have toolsAllow set in SpawnedToolContext.
+      const isInForkChild = (opts?.toolsAllow?.length ?? 0) > 0;
+      if (isInForkChild) {
         return jsonResult({
           status: "error",
           error:
