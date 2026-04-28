@@ -1,7 +1,24 @@
-export function supportsModelTools(model: { compat?: unknown }): boolean {
+let lastSupportsToolsWarning: string | undefined;
+
+export function supportsModelTools(model: {
+  compat?: unknown;
+  id?: string;
+  provider?: string;
+}): boolean {
   const compat =
     model.compat && typeof model.compat === "object"
       ? (model.compat as { supportsTools?: boolean })
       : undefined;
-  return compat?.supportsTools !== false;
+  const supports = compat?.supportsTools !== false;
+
+  if (!supports) {
+    const key = `${model.provider ?? "unknown"}/${model.id ?? "unknown"}`;
+    const msg = `tools disabled: model ${key} has supportsTools=false in compat config`;
+    if (msg !== lastSupportsToolsWarning) {
+      lastSupportsToolsWarning = msg;
+      console.warn(`[openclaw:model-tool-support] ${msg}`);
+    }
+  }
+
+  return supports;
 }

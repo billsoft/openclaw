@@ -1418,6 +1418,10 @@ export async function runEmbeddedAttempt(
         throw new Error("Embedded agent session missing");
       }
       session.setActiveToolsByName(sessionToolAllowlist);
+      console.log(
+        `[openclaw:attempt] session tools activated for session=${params.sessionKey} ` +
+          `allowlistCount=${sessionToolAllowlist.length} allowlist=[${sessionToolAllowlist.join(", ")}]`,
+      );
       const activeSession = session;
       if (typeof activeSession.agent.convertToLlm === "function") {
         const baseConvertToLlm = activeSession.agent.convertToLlm.bind(activeSession.agent);
