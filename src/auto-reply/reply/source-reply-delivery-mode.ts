@@ -5,6 +5,7 @@ import type { SourceReplyDeliveryMode } from "../get-reply-options.types.js";
 
 export type SourceReplyDeliveryModeContext = {
   ChatType?: string;
+  CommandSource?: "text" | "native";
 };
 
 export function resolveSourceReplyDeliveryMode(params: {
@@ -15,13 +16,16 @@ export function resolveSourceReplyDeliveryMode(params: {
   if (params.requested) {
     return params.requested;
   }
+  if (params.ctx.CommandSource === "native") {
+    return "automatic";
+  }
   const chatType = normalizeChatType(params.ctx.ChatType);
   if (chatType === "group" || chatType === "channel") {
-    return params.cfg.messages?.groupChat?.visibleReplies === "automatic"
-      ? "automatic"
-      : "message_tool_only";
+    const configuredMode =
+      params.cfg.messages?.groupChat?.visibleReplies ?? params.cfg.messages?.visibleReplies;
+    return configuredMode === "automatic" ? "automatic" : "message_tool_only";
   }
-  return "automatic";
+  return params.cfg.messages?.visibleReplies === "message_tool" ? "message_tool_only" : "automatic";
 }
 
 export type SourceReplyVisibilityPolicy = {
