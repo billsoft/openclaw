@@ -59,6 +59,7 @@ function makeHandler(
     streamPath: overrides?.streamPath ?? "/voice/stream/realtime",
     instructions: overrides?.instructions ?? "Be helpful.",
     toolPolicy: overrides?.toolPolicy ?? "safe-read-only",
+    consultPolicy: overrides?.consultPolicy ?? "auto",
     tools: overrides?.tools ?? [],
     fastContext: overrides?.fastContext ?? {
       enabled: false,
@@ -66,6 +67,14 @@ function makeHandler(
       maxResults: 3,
       sources: ["memory", "sessions"],
       fallbackToConsult: false,
+    },
+    agentContext: overrides?.agentContext ?? {
+      enabled: false,
+      maxChars: 6000,
+      includeIdentity: true,
+      includeSystemPrompt: true,
+      includeWorkspaceFiles: true,
+      files: ["SOUL.md", "IDENTITY.md", "USER.md"],
     },
     providers: overrides?.providers ?? {},
     ...(overrides?.provider ? { provider: overrides.provider } : {}),
@@ -337,6 +346,82 @@ describe("RealtimeCallHandler path routing", () => {
     }
   });
 
+  it("ends realtime calls when the telephony stream stops", async () => {
+    let callbacks:
+      | {
+          onClose?: (reason: "completed" | "error") => void;
+        }
+      | undefined;
+    const processEvent = vi.fn();
+    const createBridge = vi.fn(
+      (request: Parameters<RealtimeVoiceProviderPlugin["createBridge"]>[0]) => {
+        callbacks = request;
+        return makeBridge({
+          close: () => {
+            callbacks?.onClose?.("completed");
+          },
+        });
+      },
+    );
+    const getCallByProviderCallId = vi.fn(
+      (): CallRecord => ({
+        callId: "call-1",
+        providerCallId: "CA-complete",
+        provider: "twilio",
+        direction: "inbound",
+        state: "ringing",
+        from: "+15550001234",
+        to: "+15550009999",
+        startedAt: Date.now(),
+        transcript: [],
+        processedEventIds: [],
+        metadata: {},
+      }),
+    );
+    const handler = makeHandler(undefined, {
+      manager: {
+        processEvent,
+        getCallByProviderCallId,
+      },
+      realtimeProvider: makeRealtimeProvider(createBridge),
+    });
+    const server = await startRealtimeServer(handler);
+
+    try {
+      const ws = await connectWs(server.url);
+      try {
+        ws.send(
+          JSON.stringify({
+            event: "start",
+            start: { streamSid: "MZ-complete", callSid: "CA-complete" },
+          }),
+        );
+        await vi.waitFor(() => {
+          expect(createBridge).toHaveBeenCalled();
+        });
+
+        ws.send(JSON.stringify({ event: "stop" }));
+
+        await vi.waitFor(() => {
+          expect(processEvent).toHaveBeenCalledWith(
+            expect.objectContaining({
+              type: "call.ended",
+              callId: "call-1",
+              providerCallId: "CA-complete",
+              reason: "completed",
+            }),
+          );
+        });
+      } finally {
+        if (ws.readyState !== WebSocket.CLOSED && ws.readyState !== WebSocket.CLOSING) {
+          ws.close();
+        }
+      }
+    } finally {
+      await server.close();
+    }
+  });
+
   it("submits continuing responses only for realtime agent consult calls", async () => {
     let callbacks:
       | {
@@ -412,7 +497,9 @@ describe("RealtimeCallHandler path routing", () => {
           name: "openclaw_agent_consult",
           args: { question: "Are the basement lights on?" },
         });
-        expect(receivedPartialTranscript).toBe("Are the basement");
+        await vi.waitFor(() => {
+          expect(receivedPartialTranscript).toBe("Are the basement");
+        });
 
         await vi.waitFor(() => {
           expect(submitToolResult).toHaveBeenCalledWith(
@@ -452,6 +539,346 @@ describe("RealtimeCallHandler path routing", () => {
         expect(submitToolResult).not.toHaveBeenCalledWith("custom-call", expect.anything(), {
           willContinue: true,
         });
+      } finally {
+        if (ws.readyState !== WebSocket.CLOSED && ws.readyState !== WebSocket.CLOSING) {
+          ws.close();
+        }
+      }
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("forces an agent consult from final user transcript when consult policy is always", async () => {
+    let callbacks:
+      | {
+          onTranscript?: (role: "user" | "assistant", text: string, isFinal: boolean) => void;
+        }
+      | undefined;
+    const sendUserMessage = vi.fn();
+    const bridge = makeBridge({ sendUserMessage });
+    const createBridge = vi.fn(
+      (request: Parameters<RealtimeVoiceProviderPlugin["createBridge"]>[0]) => {
+        callbacks = request;
+        return bridge;
+      },
+    );
+    const handler = makeHandler(
+      { consultPolicy: "always" },
+      {
+        manager: {
+          getCallByProviderCallId: vi.fn(
+            (): CallRecord => ({
+              callId: "call-1",
+              providerCallId: "CA-force",
+              provider: "twilio",
+              direction: "inbound",
+              state: "ringing",
+              from: "+15550001234",
+              to: "+15550009999",
+              startedAt: Date.now(),
+              transcript: [],
+              processedEventIds: [],
+              metadata: {},
+            }),
+          ),
+        },
+        realtimeProvider: makeRealtimeProvider(createBridge),
+      },
+    );
+    const consult = vi.fn(async () => ({ text: "I created the smoke test file." }));
+    handler.registerToolHandler("openclaw_agent_consult", consult);
+    const server = await startRealtimeServer(handler);
+
+    try {
+      const ws = await connectWs(server.url);
+      try {
+        ws.send(
+          JSON.stringify({
+            event: "start",
+            start: { streamSid: "MZ-force", callSid: "CA-force" },
+          }),
+        );
+        await vi.waitFor(() => {
+          expect(createBridge).toHaveBeenCalled();
+        });
+
+        callbacks?.onTranscript?.("user", "Create a smoke test file for me.", true);
+
+        await vi.waitFor(() => {
+          expect(consult).toHaveBeenCalledWith(
+            expect.objectContaining({
+              question: "Create a smoke test file for me.",
+            }),
+            "call-1",
+            {},
+          );
+        });
+        await vi.waitFor(() => {
+          expect(sendUserMessage).toHaveBeenCalledWith(
+            expect.stringContaining("I created the smoke test file."),
+          );
+        });
+      } finally {
+        if (ws.readyState !== WebSocket.CLOSED && ws.readyState !== WebSocket.CLOSING) {
+          ws.close();
+        }
+      }
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("does not carry a final transcript into the next direct voice turn", async () => {
+    let callbacks:
+      | {
+          onTranscript?: (role: "user" | "assistant", text: string, isFinal: boolean) => void;
+        }
+      | undefined;
+    const processEvent = vi.fn();
+    const createBridge = vi.fn(
+      (request: Parameters<RealtimeVoiceProviderPlugin["createBridge"]>[0]) => {
+        callbacks = request;
+        return makeBridge();
+      },
+    );
+    const handler = makeHandler(undefined, {
+      manager: {
+        processEvent,
+        getCallByProviderCallId: vi.fn(
+          (): CallRecord => ({
+            callId: "call-1",
+            providerCallId: "CA-direct-turns",
+            provider: "twilio",
+            direction: "inbound",
+            state: "ringing",
+            from: "+15550001234",
+            to: "+15550009999",
+            startedAt: Date.now(),
+            transcript: [],
+            processedEventIds: [],
+            metadata: {},
+          }),
+        ),
+      },
+      realtimeProvider: makeRealtimeProvider(createBridge),
+    });
+    const server = await startRealtimeServer(handler);
+
+    try {
+      const ws = await connectWs(server.url);
+      try {
+        ws.send(
+          JSON.stringify({
+            event: "start",
+            start: { streamSid: "MZ-direct-turns", callSid: "CA-direct-turns" },
+          }),
+        );
+        await vi.waitFor(() => {
+          expect(createBridge).toHaveBeenCalled();
+        });
+
+        callbacks?.onTranscript?.("user", "Hello there.", true);
+        callbacks?.onTranscript?.("user", "How are you?", true);
+
+        expect(processEvent).toHaveBeenCalledWith(
+          expect.objectContaining({
+            type: "call.speech",
+            transcript: "Hello there.",
+          }),
+        );
+        expect(processEvent).toHaveBeenCalledWith(
+          expect.objectContaining({
+            type: "call.speech",
+            transcript: "How are you?",
+          }),
+        );
+        expect(processEvent).not.toHaveBeenCalledWith(
+          expect.objectContaining({
+            type: "call.speech",
+            transcript: "Hello there. How are you?",
+          }),
+        );
+      } finally {
+        if (ws.readyState !== WebSocket.CLOSED && ws.readyState !== WebSocket.CLOSING) {
+          ws.close();
+        }
+      }
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("waits for partial transcript fragments to settle before consulting", async () => {
+    let callbacks:
+      | {
+          onToolCall?: (event: RealtimeVoiceToolCallEvent) => void;
+          onTranscript?: (role: "user" | "assistant", text: string, isFinal: boolean) => void;
+        }
+      | undefined;
+    const submitToolResult = vi.fn();
+    const bridge = makeBridge({
+      supportsToolResultContinuation: true,
+      submitToolResult,
+    });
+    const createBridge = vi.fn(
+      (request: Parameters<RealtimeVoiceProviderPlugin["createBridge"]>[0]) => {
+        callbacks = request;
+        return bridge;
+      },
+    );
+    const handler = makeHandler(undefined, {
+      manager: {
+        getCallByProviderCallId: vi.fn(
+          (): CallRecord => ({
+            callId: "call-1",
+            providerCallId: "CA-settle",
+            provider: "twilio",
+            direction: "inbound",
+            state: "ringing",
+            from: "+15550001234",
+            to: "+15550009999",
+            startedAt: Date.now(),
+            transcript: [],
+            processedEventIds: [],
+            metadata: {},
+          }),
+        ),
+      },
+      realtimeProvider: makeRealtimeProvider(createBridge),
+    });
+    const consult = vi.fn(async () => ({ text: "I sent it." }));
+    handler.registerToolHandler("openclaw_agent_consult", consult);
+    const server = await startRealtimeServer(handler);
+
+    try {
+      const ws = await connectWs(server.url);
+      try {
+        ws.send(
+          JSON.stringify({
+            event: "start",
+            start: { streamSid: "MZ-settle", callSid: "CA-settle" },
+          }),
+        );
+        await vi.waitFor(() => {
+          expect(createBridge).toHaveBeenCalled();
+        });
+
+        callbacks?.onTranscript?.("user", "Send a Discord", false);
+        callbacks?.onToolCall?.({
+          itemId: "item-1",
+          callId: "consult-call",
+          name: "openclaw_agent_consult",
+          args: { question: "message" },
+        });
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        callbacks?.onTranscript?.("user", "message.", false);
+
+        await vi.waitFor(
+          () => {
+            expect(consult).toHaveBeenCalledWith(
+              expect.objectContaining({
+                question: "Send a Discord message.",
+                context: expect.stringContaining("shorter consult question: message"),
+              }),
+              "call-1",
+              { partialUserTranscript: "Send a Discord message." },
+            );
+          },
+          { timeout: 2_000 },
+        );
+        await vi.waitFor(() => {
+          expect(submitToolResult).toHaveBeenLastCalledWith(
+            "consult-call",
+            { text: "I sent it." },
+            undefined,
+          );
+        });
+      } finally {
+        if (ws.readyState !== WebSocket.CLOSED && ws.readyState !== WebSocket.CLOSING) {
+          ws.close();
+        }
+      }
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("does not force a duplicate consult when the realtime provider calls the consult tool", async () => {
+    let callbacks:
+      | {
+          onToolCall?: (event: RealtimeVoiceToolCallEvent) => void;
+          onTranscript?: (role: "user" | "assistant", text: string, isFinal: boolean) => void;
+        }
+      | undefined;
+    const submitToolResult = vi.fn();
+    const bridge = makeBridge({
+      supportsToolResultContinuation: true,
+      submitToolResult,
+    });
+    const createBridge = vi.fn(
+      (request: Parameters<RealtimeVoiceProviderPlugin["createBridge"]>[0]) => {
+        callbacks = request;
+        return bridge;
+      },
+    );
+    const handler = makeHandler(
+      { consultPolicy: "always" },
+      {
+        manager: {
+          getCallByProviderCallId: vi.fn(
+            (): CallRecord => ({
+              callId: "call-1",
+              providerCallId: "CA-native",
+              provider: "twilio",
+              direction: "inbound",
+              state: "ringing",
+              from: "+15550001234",
+              to: "+15550009999",
+              startedAt: Date.now(),
+              transcript: [],
+              processedEventIds: [],
+              metadata: {},
+            }),
+          ),
+        },
+        realtimeProvider: makeRealtimeProvider(createBridge),
+      },
+    );
+    const consult = vi.fn(async () => ({ text: "Native consult result." }));
+    handler.registerToolHandler("openclaw_agent_consult", consult);
+    const server = await startRealtimeServer(handler);
+
+    try {
+      const ws = await connectWs(server.url);
+      try {
+        ws.send(
+          JSON.stringify({
+            event: "start",
+            start: { streamSid: "MZ-native", callSid: "CA-native" },
+          }),
+        );
+        await vi.waitFor(() => {
+          expect(createBridge).toHaveBeenCalled();
+        });
+
+        callbacks?.onTranscript?.("user", "Send me a Discord message.", true);
+        callbacks?.onToolCall?.({
+          itemId: "item-1",
+          callId: "consult-call",
+          name: "openclaw_agent_consult",
+          args: { question: "Send me a Discord message." },
+        });
+
+        await vi.waitFor(() => {
+          expect(submitToolResult).toHaveBeenLastCalledWith(
+            "consult-call",
+            { text: "Native consult result." },
+            undefined,
+          );
+        });
+        await new Promise((resolve) => setTimeout(resolve, 250));
+        expect(consult).toHaveBeenCalledTimes(1);
       } finally {
         if (ws.readyState !== WebSocket.CLOSED && ws.readyState !== WebSocket.CLOSING) {
           ws.close();
@@ -553,6 +980,63 @@ describe("RealtimeCallHandler path routing", () => {
 });
 
 describe("RealtimeCallHandler websocket hardening", () => {
+  it("closes realtime streams when paced outbound audio exceeds the internal queue cap", async () => {
+    let sendProviderAudio: ((audio: Buffer) => void) | undefined;
+    const createBridge = vi.fn(
+      (request: Parameters<RealtimeVoiceProviderPlugin["createBridge"]>[0]) => {
+        sendProviderAudio = request.onAudio;
+        return makeBridge();
+      },
+    );
+    const handler = makeHandler(undefined, {
+      manager: {
+        getCallByProviderCallId: vi.fn(
+          (): CallRecord => ({
+            callId: "call-1",
+            providerCallId: "CA-backpressure",
+            provider: "twilio",
+            direction: "inbound",
+            state: "ringing",
+            from: "+15550001234",
+            to: "+15550009999",
+            startedAt: Date.now(),
+            transcript: [],
+            processedEventIds: [],
+            metadata: {},
+          }),
+        ),
+      },
+      realtimeProvider: makeRealtimeProvider(createBridge),
+    });
+    const server = await startRealtimeServer(handler);
+
+    try {
+      const ws = await connectWs(server.url);
+      try {
+        ws.send(
+          JSON.stringify({
+            event: "start",
+            start: { streamSid: "MZ-backpressure", callSid: "CA-backpressure" },
+          }),
+        );
+        await vi.waitFor(() => {
+          expect(sendProviderAudio).toBeDefined();
+        });
+
+        sendProviderAudio?.(Buffer.alloc(8_000 * 121, 0x7f));
+        const closed = await waitForClose(ws);
+
+        expect(closed.code).toBe(1013);
+      } finally {
+        if (ws.readyState !== WebSocket.CLOSED && ws.readyState !== WebSocket.CLOSING) {
+          ws.close();
+        }
+      }
+    } finally {
+      await server.close();
+    }
+  });
+
   it("rejects oversized pre-start frames before bridge setup", async () => {
     const createBridge = vi.fn(() => makeBridge());
     const processEvent = vi.fn();
