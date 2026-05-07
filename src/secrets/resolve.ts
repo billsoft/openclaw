@@ -306,10 +306,16 @@ async function readFileProviderPayload(params: {
       }
       return parsed;
     } catch (error) {
-      if (error instanceof FsSafeError && error.code === "timeout") {
-        throw new Error(`File provider "${params.providerName}" timed out after ${timeoutMs}ms.`, {
-          cause: error,
-        });
+      if (error instanceof FsSafeError) {
+        const fsError = error as FsSafeError & { code?: string };
+        if (fsError.code === "timeout") {
+          throw new Error(
+            `File provider "${params.providerName}" timed out after ${timeoutMs}ms.`,
+            {
+              cause: fsError,
+            },
+          );
+        }
       }
       throw error;
     }

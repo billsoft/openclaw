@@ -2,7 +2,11 @@ import fs from "node:fs";
 import path from "node:path";
 import type { ChannelConfigRuntimeSchema } from "../channels/plugins/types.config.js";
 import { MANIFEST_KEY } from "../compat/legacy-names.js";
-import { matchRootFileOpenFailure, openRootFileSync } from "../infra/boundary-file-read.js";
+import {
+  matchRootFileOpenFailure,
+  openRootFileSync,
+  type RootFileOpenFailure,
+} from "../infra/boundary-file-read.js";
 import { isBlockedObjectKey } from "../infra/prototype-keys.js";
 import {
   normalizeModelCatalog,
@@ -1528,7 +1532,7 @@ export function loadPluginManifest(
         error: `plugin manifest not found: ${manifestPath}`,
         manifestPath,
       }),
-      fallback: (failure) => ({
+      fallback: (failure: RootFileOpenFailure) => ({
         ok: false,
         error: `unsafe plugin manifest path: ${manifestPath} (${failure.reason})`,
         manifestPath,

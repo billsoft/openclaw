@@ -49,7 +49,7 @@ export function resolveBundleJsonOpenFailure(params: {
       }
       return { ok: false, error: `unable to read ${params.relativePath}: path` };
     },
-    fallback: (failure) => ({
+    fallback: (failure: RootFileOpenFailure) => ({
       ok: false,
       error: `unable to read ${params.relativePath}: ${failure.reason}`,
     }),

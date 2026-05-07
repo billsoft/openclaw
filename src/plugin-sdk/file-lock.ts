@@ -1,8 +1,8 @@
-import "../infra/fs-safe-defaults.js";
 import {
   acquireFileLock as acquireFsSafeFileLock,
   drainFileLockManagerForTest,
   resetFileLockManagerForTest,
+  withFileLock as withFsSafeFileLock,
 } from "@openclaw/fs-safe/file-lock";
 import { isPidAlive } from "../shared/pid-alive.js";
 
@@ -73,14 +73,6 @@ function normalizeTimeoutError(err: unknown): never {
   throw err;
 }
 
-export function resetFileLockStateForTest(): void {
-  resetFileLockManagerForTest(FILE_LOCK_MANAGER_KEY, FILE_LOCK_MANAGER_KEY);
-}
-
-export async function drainFileLockStateForTest(): Promise<void> {
-  await drainFileLockManagerForTest(FILE_LOCK_MANAGER_KEY, FILE_LOCK_MANAGER_KEY);
-}
-
 /** Acquire a re-entrant process-local file lock backed by a `.lock` sidecar file. */
 export async function acquireFileLock(
   filePath: string,
@@ -114,3 +106,9 @@ export async function withFileLock<T>(
     await lock.release();
   }
 }
+
+/** Re-export test utilities for backward compatibility. */
+export const drainFileLockStateForTest = async (): Promise<void> => {
+  await drainFileLockManagerForTest("", FILE_LOCK_MANAGER_KEY);
+};
+export { resetFileLockManagerForTest as resetFileLockStateForTest };

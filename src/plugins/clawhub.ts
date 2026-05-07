@@ -701,13 +701,14 @@ function validateClawHubArchiveMetaJson(params: {
 
 function mapClawHubArchiveReadFailure(error: unknown): ClawHubInstallFailure {
   if (error instanceof ArchiveLimitError) {
-    if (error.code === ARCHIVE_LIMIT_ERROR_CODE.ENTRY_COUNT_EXCEEDS_LIMIT) {
+    const limitError = error as ArchiveLimitError & { code?: string };
+    if (limitError.code === ARCHIVE_LIMIT_ERROR_CODE.ENTRY_COUNT_EXCEEDS_LIMIT) {
       return buildClawHubInstallFailure(
         "ClawHub archive fallback verification exceeded the archive entry limit.",
         CLAWHUB_INSTALL_ERROR_CODE.ARCHIVE_INTEGRITY_MISMATCH,
       );
     }
-    if (error.code === ARCHIVE_LIMIT_ERROR_CODE.ARCHIVE_SIZE_EXCEEDS_LIMIT) {
+    if (limitError.code === ARCHIVE_LIMIT_ERROR_CODE.ARCHIVE_SIZE_EXCEEDS_LIMIT) {
       return buildClawHubInstallFailure(
         "ClawHub archive fallback verification rejected the downloaded archive because it exceeds the ZIP archive size limit.",
         CLAWHUB_INSTALL_ERROR_CODE.ARCHIVE_INTEGRITY_MISMATCH,

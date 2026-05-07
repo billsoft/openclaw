@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import JSON5 from "json5";
-import { matchRootFileOpenFailure } from "../infra/boundary-file-read.js";
+import { matchRootFileOpenFailure, type RootFileOpenFailure } from "../infra/boundary-file-read.js";
 import { readRootStructuredFileSync } from "../infra/json-files.js";
 import {
   normalizeLowercaseStringOrEmpty,
@@ -105,7 +105,7 @@ function loadBundleManifestFile(params: {
     relativePath: params.manifestRelativePath,
     boundaryLabel: "plugin root",
     rejectHardlinks: params.rejectHardlinks,
-    parse: (raw) => JSON5.parse(raw),
+    parse: (raw: string) => JSON5.parse(raw),
     validate: isRecord,
   });
   if (!result.ok && result.reason === "open") {
@@ -116,7 +116,7 @@ function loadBundleManifestFile(params: {
         }
         return { ok: false, error: `plugin manifest not found: ${manifestPath}`, manifestPath };
       },
-      fallback: (failure) => ({
+      fallback: (failure: RootFileOpenFailure) => ({
         ok: false,
         error: `unsafe plugin manifest path: ${manifestPath} (${failure.reason})`,
         manifestPath,
