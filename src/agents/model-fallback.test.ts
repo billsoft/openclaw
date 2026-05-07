@@ -1,9 +1,14 @@
 import crypto from "node:crypto";
 import path from "node:path";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { OpenClawConfig } from "../config/config.js";
 import { resetLogger, setLoggerOverride } from "../logging/logger.js";
 import { createWarnLogCapture } from "../logging/test-helpers/warn-log-capture.js";
+import {
+  clearCurrentPluginMetadataSnapshot,
+  setCurrentPluginMetadataSnapshot,
+} from "../plugins/current-plugin-metadata-snapshot.js";
+import { loadPluginMetadataSnapshot } from "../plugins/plugin-metadata-snapshot.js";
 import { AUTH_STORE_VERSION } from "./auth-profiles/constants.js";
 import type { AuthProfileStore } from "./auth-profiles/types.js";
 import { FailoverError } from "./failover-error.js";
@@ -16,6 +21,7 @@ import {
 } from "./model-fallback.js";
 import { classifyEmbeddedPiRunResultForModelFallback } from "./pi-embedded-runner/result-fallback-classifier.js";
 import type { EmbeddedPiRunResult } from "./pi-embedded-runner/types.js";
+import { SessionWriteLockTimeoutError } from "./session-write-lock-error.js";
 import { makeModelFallbackCfg } from "./test-helpers/model-fallback-config-fixture.js";
 
 vi.mock("../infra/file-lock.js", () => ({
@@ -25,6 +31,10 @@ vi.mock("../infra/file-lock.js", () => ({
 vi.mock("../plugins/provider-runtime.js", () => ({
   buildProviderMissingAuthMessageWithPlugin: () => undefined,
   resolveExternalAuthProfilesWithPlugins: () => [],
+}));
+
+vi.mock("./provider-model-normalization.runtime.js", () => ({
+  normalizeProviderModelIdWithRuntime: () => undefined,
 }));
 
 const authSourceCheckMock = vi.hoisted(() => ({
@@ -140,6 +150,17 @@ vi.mock("./model-fallback-auth.runtime.js", () => authRuntimeMock.runtime);
 const makeCfg = makeModelFallbackCfg;
 let authTempRoot = "";
 let authTempCounter = 0;
+
+beforeAll(() => {
+  setCurrentPluginMetadataSnapshot(loadPluginMetadataSnapshot({ config: {}, env: process.env }), {
+    config: {},
+    env: process.env,
+  });
+});
+
+afterAll(() => {
+  clearCurrentPluginMetadataSnapshot();
+});
 
 function resetModelFallbackTestState(): void {
   authRuntimeMock.clear();
@@ -535,6 +556,35 @@ describe("runWithModelFallback", () => {
     }
   });
 
+  it("fails fast on session write-lock timeouts instead of trying model fallbacks", async () => {
+    const cfg = makeCfg({
+      agents: {
+        defaults: {
+          model: {
+            primary: "openai/gpt-5.4",
+            fallbacks: ["anthropic/claude-opus-4-6"],
+          },
+        },
+      },
+    });
+    const lockError = new SessionWriteLockTimeoutError({
+      timeoutMs: 10_000,
+      owner: "pid=37121",
+      lockPath: "/tmp/openclaw/session.jsonl.lock",
+    });
+    const run = vi.fn().mockRejectedValueOnce(lockError);
+
+    await expect(
+      runWithModelFallback({
+        cfg,
+        provider: "openai",
+        model: "gpt-5.4",
+        run,
+      }),
+    ).rejects.toBe(lockError);
+    expect(run).toHaveBeenCalledTimes(1);
+  });
+
   it("uses optional result classification to continue to configured fallbacks", async () => {
     const cfg = makeCfg({
       agents: {
@@ -673,6 +723,28 @@ describe("runWithModelFallback", () => {
       classifyEmbeddedPiRunResultForModelFallback({
         provider: "openai-codex",
         model: "gpt-5.4",
+        result: runResult,
+      }),
+    ).toBeNull();
+  });
+
+  it("keeps before_agent_run hook blocks out of empty-result fallback", () => {
+    const runResult: EmbeddedPiRunResult = {
+      payloads: [{ text: "Blocked by before-run policy.", isError: true }],
+      meta: {
+        durationMs: 1,
+        livenessState: "blocked",
+        error: {
+          kind: "hook_block",
+          message: "Blocked by before-run policy.",
+        },
+      },
+    };
+
+    expect(
+      classifyEmbeddedPiRunResultForModelFallback({
+        provider: "atlassian-ai-gateway-openai",
+        model: "gpt-5.5-2026-04-23",
         result: runResult,
       }),
     ).toBeNull();
