@@ -257,7 +257,7 @@ async function resolveCliMediaPath(params: {
   await writeExternalFileWithinRoot({
     rootDir: params.outputDir,
     path: path.basename(wavPath),
-    write: async (outputPath) => {
+    write: async (outputPath: string) => {
       await runFfmpeg([
         "-y",
         "-i",

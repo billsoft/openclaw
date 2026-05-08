@@ -65,7 +65,7 @@ export async function transcodeAudioBufferToOpus(params: {
       await writeExternalFileWithinRoot({
         rootDir: workspace.dir,
         path: outputFileName,
-        write: async (outputPath) => {
+        write: async (outputPath: string) => {
           await runFfmpeg(
             [
               "-hide_banner",
