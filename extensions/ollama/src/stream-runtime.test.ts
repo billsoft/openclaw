@@ -1237,12 +1237,19 @@ async function nextEventWithin<T>(
   iterator: AsyncIterator<T>,
   timeoutMs = 100,
 ): Promise<IteratorResult<T> | "timeout"> {
-  return await Promise.race([
-    iterator.next(),
-    new Promise<"timeout">((resolve) => {
-      setTimeout(() => resolve("timeout"), timeoutMs);
-    }),
-  ]);
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      iterator.next(),
+      new Promise<"timeout">((resolve) => {
+        timer = setTimeout(() => resolve("timeout"), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) {
+      clearTimeout(timer);
+    }
+  }
 }
 
 describe("createOllamaStreamFn streaming events", () => {
@@ -1908,10 +1915,12 @@ describe("createOllamaStreamFn", () => {
       const errorEvent = events.find((e) => e.type === "error") as
         | { type: "error"; error: { errorMessage?: string } }
         | undefined;
-      expect(errorEvent).toBeDefined();
+      if (!errorEvent) {
+        throw new Error("expected Ollama stream error event");
+      }
       // The error message must start with the HTTP status code so that
       // extractLeadingHttpStatus can parse it for failover/retry logic.
-      expect(errorEvent!.error.errorMessage).toMatch(/^503\b/);
+      expect(errorEvent.error.errorMessage).toMatch(/^503\b/);
     } finally {
       fetchWithSsrFGuardMock.mockReset();
     }

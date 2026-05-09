@@ -5,6 +5,16 @@ import { createAcpTestConfig as createCfg } from "./test-fixtures/acp-runtime.js
 
 type Delivery = { kind: string; text?: string };
 
+function countMatching<T>(items: readonly T[], predicate: (item: T) => boolean): number {
+  let count = 0;
+  for (const item of items) {
+    if (predicate(item)) {
+      count += 1;
+    }
+  }
+  return count;
+}
+
 function createProjectorHarness(
   cfgOverrides?: Parameters<typeof createCfg>[0],
   opts?: { onProgress?: () => void },
@@ -201,7 +211,7 @@ describe("createAcpReplyProjector", () => {
     expect(onProgress).toHaveBeenCalledTimes(2);
   });
 
-  it("coalesces text deltas into bounded block chunks", async () => {
+  it("buffers default final-only text into one final reply", async () => {
     const { deliveries, projector } = createProjectorHarness();
 
     await projector.onEvent({
@@ -211,10 +221,7 @@ describe("createAcpReplyProjector", () => {
     });
     await projector.flush(true);
 
-    expect(deliveries).toEqual([
-      { kind: "block", text: "a".repeat(64) },
-      { kind: "block", text: "a".repeat(6) },
-    ]);
+    expect(deliveries).toEqual([{ kind: "final", text: "a".repeat(70) }]);
   });
 
   it("does not suppress identical short text across terminal turn boundaries", async () => {
@@ -363,7 +370,7 @@ describe("createAcpReplyProjector", () => {
       text: prefixSystemMessage("available commands updated (7)"),
     });
     expectToolCallSummary(deliveries[1]);
-    expect(deliveries[2]).toEqual({ kind: "block", text: "What now?" });
+    expect(deliveries[2]).toEqual({ kind: "final", text: "What now?" });
   });
 
   it("flushes buffered status/tool output on error in deliveryMode=final_only", async () => {
@@ -570,7 +577,7 @@ describe("createAcpReplyProjector", () => {
     });
     await projector.flush(true);
 
-    expect(deliveries.filter((entry) => entry.kind === "tool").length).toBe(4);
+    expect(countMatching(deliveries, (entry) => entry.kind === "tool")).toBe(4);
     expect(deliveries[0]).toEqual({
       kind: "tool",
       text: prefixSystemMessage("available commands updated"),

@@ -131,9 +131,19 @@ const authRuntimeMock = vi.hoisted(() => {
             continue;
           }
           const stats = store.usageStats?.[profileId];
-          const expiry = [stats?.cooldownUntil, stats?.disabledUntil]
-            .filter((value): value is number => isActive(value, ts))
-            .toSorted((a, b) => a - b)[0];
+          const cooldownUntil = stats?.cooldownUntil;
+          const disabledUntil = stats?.disabledUntil;
+          let expiry: number | undefined;
+          if (isActive(cooldownUntil, ts)) {
+            expiry = cooldownUntil;
+          }
+          if (
+            disabledUntil !== undefined &&
+            isActive(disabledUntil, ts) &&
+            (expiry === undefined || disabledUntil < expiry)
+          ) {
+            expiry = disabledUntil;
+          }
           if (expiry !== undefined && (soonest === null || expiry < soonest)) {
             soonest = expiry;
           }
@@ -1416,7 +1426,7 @@ describe("runWithModelFallback", () => {
     });
   });
 
-  it("uses fallbacksOverride instead of agents.defaults.model.fallbacks", async () => {
+  it("uses fallbacksOverride instead of agents.defaults.model.fallbacks", () => {
     const cfg = makeFallbacksOnlyCfg();
 
     const candidates = __testing.resolveFallbackCandidates({
@@ -1432,7 +1442,7 @@ describe("runWithModelFallback", () => {
     ]);
   });
 
-  it("treats an empty fallbacksOverride as disabling global fallbacks", async () => {
+  it("treats an empty fallbacksOverride as disabling global fallbacks", () => {
     const cfg = makeFallbacksOnlyCfg();
 
     const candidates = __testing.resolveFallbackCandidates({
@@ -1445,7 +1455,7 @@ describe("runWithModelFallback", () => {
     expect(candidates).toEqual([{ provider: "anthropic", model: "claude-opus-4-5" }]);
   });
 
-  it("keeps explicit fallbacks reachable when models allowlist is present", async () => {
+  it("keeps explicit fallbacks reachable when models allowlist is present", () => {
     const cfg = makeCfg({
       agents: {
         defaults: {
@@ -1472,7 +1482,7 @@ describe("runWithModelFallback", () => {
     ]);
   });
 
-  it("defaults provider/model when missing (regression #946)", async () => {
+  it("defaults provider/model when missing (regression #946)", () => {
     const cfg = makeCfg({
       agents: {
         defaults: {

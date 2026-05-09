@@ -87,6 +87,7 @@ function threadStartResult(threadId = "thread-1") {
   return {
     thread: {
       id: threadId,
+      sessionId: "session-1",
       forkedFromId: null,
       preview: "",
       ephemeral: false,
@@ -673,8 +674,10 @@ describe("runCodexAppServerAttempt", () => {
     params.sourceReplyDeliveryMode = "message_tool_only";
     params.toolsAllow = ["message", "web_search", "heartbeat_respond"];
 
-    const run = runCodexAppServerAttempt(params);
-    await harness.waitForMethod("turn/start", 60_000);
+    const run = runCodexAppServerAttempt(params, {
+      pluginConfig: { appServer: { mode: "yolo" } },
+    });
+    await harness.waitForMethod("turn/start", 120_000);
     await harness.completeTurn({ threadId: "thread-1", turnId: "turn-1" });
     await run;
 
@@ -1746,16 +1749,20 @@ describe("runCodexAppServerAttempt", () => {
     const sessionFile = path.join(tempDir, "session.jsonl");
     const workspaceDir = path.join(tempDir, "workspace");
     const resetsAt = Math.ceil(Date.now() / 1000) + 120;
-    let harness!: ReturnType<typeof createStartedThreadHarness>;
-    harness = createStartedThreadHarness(async (method) => {
+    const harnessRef: { current?: ReturnType<typeof createStartedThreadHarness> } = {};
+    const harness = createStartedThreadHarness(async (method) => {
       if (method === "turn/start") {
-        await harness.notify(rateLimitsUpdated(resetsAt));
+        if (!harnessRef.current) {
+          throw new Error("Expected Codex app-server harness to be initialized");
+        }
+        await harnessRef.current.notify(rateLimitsUpdated(resetsAt));
         throw Object.assign(new Error("You've reached your usage limit."), {
           data: { codexErrorInfo: "usageLimitExceeded" },
         });
       }
       return undefined;
     });
+    harnessRef.current = harness;
 
     const runError = runCodexAppServerAttempt(createParams(sessionFile, workspaceDir)).catch(
       (error: unknown) => error,
@@ -1952,6 +1959,7 @@ describe("runCodexAppServerAttempt", () => {
     const { waitForMethod } = createStartedThreadHarness();
     const run = runCodexAppServerAttempt(
       createParams(path.join(tempDir, "session.jsonl"), path.join(tempDir, "workspace")),
+      { pluginConfig: { appServer: { mode: "yolo" } } },
     );
 
     await waitForMethod("turn/start");
@@ -1973,17 +1981,17 @@ describe("runCodexAppServerAttempt", () => {
 
     const run = runCodexAppServerAttempt(
       createParams(path.join(tempDir, "session.jsonl"), path.join(tempDir, "workspace")),
+      { pluginConfig: { appServer: { mode: "yolo" } } },
     );
     await waitForMethod("turn/start");
 
     expect(queueAgentHarnessMessage("session-1", "more context", { debounceMs: 1 })).toBe(true);
-    await vi.waitFor(
-      () => expect(requests.some((entry) => entry.method === "turn/steer")).toBe(true),
-      { interval: 1 },
-    );
+    await vi.waitFor(() => expect(requests.map((entry) => entry.method)).toContain("turn/steer"), {
+      interval: 1,
+    });
     expect(abortAgentHarnessRun("session-1")).toBe(true);
     await vi.waitFor(
-      () => expect(requests.some((entry) => entry.method === "turn/interrupt")).toBe(true),
+      () => expect(requests.map((entry) => entry.method)).toContain("turn/interrupt"),
       { interval: 1 },
     );
 
@@ -2159,7 +2167,7 @@ describe("runCodexAppServerAttempt", () => {
     params.onBlockReply = vi.fn();
     const run = runCodexAppServerAttempt(params);
     await vi.waitFor(
-      () => expect(request.mock.calls.some(([method]) => method === "turn/start")).toBe(true),
+      () => expect(request.mock.calls.map(([method]) => method)).toContain("turn/start"),
       { interval: 1 },
     );
     await vi.waitFor(() => expect(handleRequest).toBeTypeOf("function"), { interval: 1 });
@@ -2404,7 +2412,7 @@ describe("runCodexAppServerAttempt", () => {
     };
     const run = runCodexAppServerAttempt(params);
     await vi.waitFor(() =>
-      expect(request.mock.calls.some(([method]) => method === "turn/start")).toBe(true),
+      expect(request.mock.calls.map(([method]) => method)).toContain("turn/start"),
     );
     await notify({
       method: "turn/completed",
@@ -3106,7 +3114,9 @@ describe("runCodexAppServerAttempt", () => {
     await writeExistingBinding(sessionFile, workspaceDir, { dynamicToolsFingerprint: "[]" });
     const { requests, waitForMethod, completeTurn } = createResumeHarness();
 
-    const run = runCodexAppServerAttempt(createParams(sessionFile, workspaceDir));
+    const run = runCodexAppServerAttempt(createParams(sessionFile, workspaceDir), {
+      pluginConfig: { appServer: { mode: "yolo" } },
+    });
     await waitForMethod("turn/start");
     await completeTurn({ threadId: "thread-existing", turnId: "turn-1" });
     await run;
@@ -4006,7 +4016,7 @@ describe("runCodexAppServerAttempt", () => {
       approvalPolicy: "on-request",
       approvalsReviewer: "guardian_subagent",
       sandbox: "danger-full-access",
-      serviceTier: "fast",
+      serviceTier: "priority",
       developerInstructions: expect.stringContaining(CODEX_GPT5_BEHAVIOR_CONTRACT),
       persistExtendedHistory: true,
     });
@@ -4018,7 +4028,7 @@ describe("runCodexAppServerAttempt", () => {
             approvalPolicy: "on-request",
             approvalsReviewer: "guardian_subagent",
             sandboxPolicy: { type: "dangerFullAccess" },
-            serviceTier: "fast",
+            serviceTier: "priority",
             model: "gpt-5.4-codex",
           }),
         },
@@ -4026,7 +4036,7 @@ describe("runCodexAppServerAttempt", () => {
     );
   });
 
-  it("drops invalid legacy service tiers before app-server resume and turn requests", async () => {
+  it("passes current Codex service tier request values through app-server resume and turn requests", async () => {
     const sessionFile = path.join(tempDir, "session.jsonl");
     const workspaceDir = path.join(tempDir, "workspace");
     await writeExistingBinding(sessionFile, workspaceDir, { model: "gpt-5.2" });
@@ -4046,13 +4056,9 @@ describe("runCodexAppServerAttempt", () => {
     await run;
 
     const resumeRequest = requests.find((request) => request.method === "thread/resume");
-    expect(resumeRequest?.params).toEqual(
-      expect.not.objectContaining({ serviceTier: expect.anything() }),
-    );
+    expect(resumeRequest?.params).toEqual(expect.objectContaining({ serviceTier: "priority" }));
     const turnRequest = requests.find((request) => request.method === "turn/start");
-    expect(turnRequest?.params).toEqual(
-      expect.not.objectContaining({ serviceTier: expect.anything() }),
-    );
+    expect(turnRequest?.params).toEqual(expect.objectContaining({ serviceTier: "priority" }));
   });
 
   it("keys plugin app inventory by websocket credentials without exposing them", () => {

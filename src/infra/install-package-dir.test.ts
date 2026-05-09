@@ -16,14 +16,24 @@ vi.mock("../process/exec.js", async () => {
 
 async function listMatchingDirs(root: string, prefix: string): Promise<string[]> {
   const entries = await fs.readdir(root, { withFileTypes: true });
-  return entries
-    .filter((entry) => entry.isDirectory() && entry.name.startsWith(prefix))
-    .map((entry) => entry.name);
+  const names: string[] = [];
+  for (const entry of entries) {
+    if (entry.isDirectory() && entry.name.startsWith(prefix)) {
+      names.push(entry.name);
+    }
+  }
+  return names;
 }
 
 async function listMatchingEntries(root: string, prefix: string): Promise<string[]> {
   const entries = await fs.readdir(root, { withFileTypes: true });
-  return entries.filter((entry) => entry.name.startsWith(prefix)).map((entry) => entry.name);
+  const names: string[] = [];
+  for (const entry of entries) {
+    if (entry.name.startsWith(prefix)) {
+      names.push(entry.name);
+    }
+  }
+  return names;
 }
 
 function normalizeDarwinTmpPath(filePath: string): string {
@@ -412,12 +422,14 @@ describe("installPackageDir", () => {
 
     vi.mocked(runCommandWithTimeout).mockImplementation(async (_argv, optionsOrTimeout) => {
       const cwd = typeof optionsOrTimeout === "number" ? undefined : optionsOrTimeout.cwd;
-      expect(cwd).toBeTruthy();
-      await expect(fs.stat(path.join(cwd ?? "", ".npmrc"))).rejects.toMatchObject({
+      if (cwd === undefined) {
+        throw new Error("expected package install cwd");
+      }
+      await expect(fs.stat(path.join(cwd, ".npmrc"))).rejects.toMatchObject({
         code: "ENOENT",
       });
       await expect(
-        listMatchingEntries(cwd ?? "", ".openclaw-install-hidden-npmrc-"),
+        listMatchingEntries(cwd, ".openclaw-install-hidden-npmrc-"),
       ).resolves.toHaveLength(1);
       return {
         stdout: "",

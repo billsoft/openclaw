@@ -114,7 +114,10 @@ const createCompactionHandler = () => {
   } as unknown as ExtensionAPI;
   compactionSafeguardExtension(mockApi);
   expect(compactionHandler).toBeDefined();
-  return compactionHandler as CompactionHandler;
+  if (!compactionHandler) {
+    throw new Error("Expected compaction safeguard to register a handler.");
+  }
+  return compactionHandler;
 };
 
 const createCompactionEvent = (params: { messageText: string; tokensBefore: number }) => ({
@@ -193,7 +196,6 @@ function expectCompactionResult(result: {
   };
 }) {
   expect(result.cancel).not.toBe(true);
-  expect(result.compaction).toBeDefined();
   if (!result.compaction) {
     throw new Error("Expected compaction result");
   }
@@ -510,7 +512,7 @@ describe("compaction-safeguard runtime registry", () => {
   it("clears entry when value is null", () => {
     const sm = {};
     setCompactionSafeguardRuntime(sm, { maxHistoryShare: 0.7 });
-    expect(getCompactionSafeguardRuntime(sm)).not.toBeNull();
+    expect(getCompactionSafeguardRuntime(sm)).toEqual({ maxHistoryShare: 0.7 });
     setCompactionSafeguardRuntime(sm, null);
     expect(getCompactionSafeguardRuntime(sm)).toBeNull();
   });
@@ -898,7 +900,9 @@ describe("compaction-safeguard recent-turn preservation", () => {
     const identifiers = extractOpaqueIdentifiers(
       "Track id a1b2c3d4e5f6 plus A1B2C3D4E5F6 and again a1b2c3d4e5f6",
     );
-    expect(identifiers.filter((id) => id === "A1B2C3D4E5F6")).toHaveLength(1); // pragma: allowlist secret
+    expect(
+      identifiers.reduce((count, id) => count + (id === "A1B2C3D4E5F6" ? 1 : 0), 0), // pragma: allowlist secret
+    ).toBe(1);
   });
 
   it("dedupes identifiers before applying the result cap", () => {
@@ -2226,7 +2230,7 @@ describe("compaction-safeguard double-compaction guard", () => {
     expect(getApiKeyAndHeadersMock).toHaveBeenCalled();
   });
 
-  it("treats tool results as real conversation only when linked to a meaningful user ask", async () => {
+  it("treats tool results as real conversation only when linked to a meaningful user ask", () => {
     expect(
       __testing.isRealConversationMessage(
         {

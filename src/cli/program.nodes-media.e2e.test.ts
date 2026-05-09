@@ -74,7 +74,10 @@ describe("cli program (nodes media)", () => {
     runtime.error.mockClear();
 
     await expect(parseProgram.parseAsync(args, { from: "user" })).rejects.toThrow(/exit/i);
-    expect(runtime.error.mock.calls.some(([msg]) => expectedError.test(String(msg)))).toBe(true);
+    const matchingErrors = runtime.error.mock.calls
+      .map(([msg]) => String(msg))
+      .filter((msg) => expectedError.test(msg));
+    expect(matchingErrors.length).toBeGreaterThan(0);
   }
 
   async function runAndExpectUrlPayloadMediaFile(params: {
@@ -110,11 +113,16 @@ describe("cli program (nodes media)", () => {
     expect(facings).toEqual(["back", "front"]);
 
     const out = getFirstRuntimeLogLine();
-    const mediaPaths = out
-      .split("\n")
-      .filter((l) => l.startsWith("MEDIA:"))
-      .map((l) => l.replace(/^MEDIA:/, ""))
-      .filter(Boolean);
+    const mediaPaths: string[] = [];
+    for (const line of out.split("\n")) {
+      if (!line.startsWith("MEDIA:")) {
+        continue;
+      }
+      const mediaPath = line.replace(/^MEDIA:/, "");
+      if (mediaPath.length > 0) {
+        mediaPaths.push(mediaPath);
+      }
+    }
     expect(mediaPaths).toHaveLength(2);
     expect(mediaPaths[0]).toContain("openclaw-camera-snap-");
     expect(mediaPaths[1]).toContain("openclaw-camera-snap-");
@@ -122,8 +130,8 @@ describe("cli program (nodes media)", () => {
     try {
       // Content bytes are covered by single-output camera/file tests; here we
       // only verify dual snapshot behavior and that both paths were written.
-      await expect(fs.stat(mediaPaths[0])).resolves.toBeTruthy();
-      await expect(fs.stat(mediaPaths[1])).resolves.toBeTruthy();
+      expect((await fs.stat(mediaPaths[0])).isFile()).toBe(true);
+      expect((await fs.stat(mediaPaths[1])).isFile()).toBe(true);
     } finally {
       await Promise.all(mediaPaths.map((p) => fs.unlink(p).catch(() => {})));
     }

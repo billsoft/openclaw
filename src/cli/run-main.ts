@@ -207,6 +207,20 @@ async function closeCliMemoryManagers(): Promise<void> {
   }
 }
 
+async function disposeCliAgentHarnesses(): Promise<void> {
+  try {
+    const { listAgentHarnessIds, disposeRegisteredAgentHarnesses } =
+      await import("../agents/harness/registry.js");
+    if (listAgentHarnessIds().length === 0) {
+      return;
+    }
+    await disposeRegisteredAgentHarnesses();
+  } catch {
+    // Best-effort teardown for short-lived CLI commands. Harness plugins may
+    // own subprocesses, but cleanup must not hide the command's real outcome.
+  }
+}
+
 function pauseNonTtyStdinForCliExit(): void {
   const stdin = process.stdin;
   if (stdin.isTTY) {
@@ -566,6 +580,7 @@ export async function runCli(argv: string[] = process.argv) {
       const [
         { buildProgram },
         { formatUncaughtError },
+        { formatCliFailureLines },
         { runFatalErrorHooks },
         {
           installUnhandledRejectionHandler,
@@ -577,6 +592,7 @@ export async function runCli(argv: string[] = process.argv) {
         Promise.all([
           import("./program.js"),
           import("../infra/errors.js"),
+          import("./failure-output.js"),
           import("../infra/fatal-error-hooks.js"),
           import("../infra/unhandled-rejections.js"),
           import("../terminal/restore.js"),
@@ -599,7 +615,13 @@ export async function runCli(argv: string[] = process.argv) {
           );
           return;
         }
-        console.error("[openclaw] Uncaught exception:", formatUncaughtError(error));
+        for (const line of formatCliFailureLines({
+          title: "OpenClaw hit an unexpected runtime error.",
+          error,
+          argv: normalizedArgv,
+        })) {
+          console.error(line);
+        }
         for (const message of runFatalErrorHooks({ reason: "uncaught_exception", error })) {
           console.error("[openclaw]", message);
         }
@@ -691,6 +713,7 @@ export async function runCli(argv: string[] = process.argv) {
       process.off("exit", onExit);
     }
     await stopStartedProxy();
+    await disposeCliAgentHarnesses();
     await closeCliMemoryManagers();
     pauseNonTtyStdinForCliExit();
   }
