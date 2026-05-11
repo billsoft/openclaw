@@ -307,8 +307,8 @@ function getLastCaptureClickListener(calls: readonly unknown[][]) {
 
 function expectLastCaptureClickListener(calls: readonly unknown[][]): unknown {
   const listener = getLastCaptureClickListener(calls);
-  expect(listener).toEqual(expect.any(Function));
-  if (listener === null) {
+  expect(typeof listener).toBe("function");
+  if (typeof listener !== "function") {
     throw new Error("Expected capture click listener");
   }
   return listener;
@@ -735,7 +735,7 @@ describe("grouped chat rendering", () => {
 
     expectElement(container, ".chat-bubble--tool-shell", HTMLElement);
     const summary = container.querySelector<HTMLElement>(".chat-tool-msg-summary");
-    expect(summary?.textContent).toContain("Tool call");
+    expect(summary?.textContent).toContain("sessions_spawn");
     expect(container.textContent).not.toContain('"thread": true');
 
     renderAssistantMessage(container, message, {

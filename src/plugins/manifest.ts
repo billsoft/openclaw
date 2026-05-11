@@ -308,6 +308,8 @@ export type PluginManifest = {
    * Optional lightweight module that exports provider plugin metadata for
    * auth/catalog discovery. It should not import the full plugin runtime.
    */
+  providerCatalogEntry?: string;
+  /** @deprecated Use providerCatalogEntry. */
   providerDiscoveryEntry?: string;
   /**
    * Cheap model-family ownership metadata used before plugin runtime loads.
@@ -1593,6 +1595,7 @@ export function loadPluginManifest(
   const version = normalizeOptionalString(raw.version);
   const channels = normalizeTrimmedStringList(raw.channels);
   const providers = normalizeTrimmedStringList(raw.providers);
+  const providerCatalogEntry = normalizeOptionalString(raw.providerCatalogEntry);
   const providerDiscoveryEntry = normalizeOptionalString(raw.providerDiscoveryEntry);
   const modelSupport = normalizeManifestModelSupport(raw.modelSupport);
   const modelCatalog = normalizeModelCatalog(raw.modelCatalog, {
@@ -1656,6 +1659,7 @@ export function loadPluginManifest(
       kind,
       channels,
       providers,
+      providerCatalogEntry,
       providerDiscoveryEntry,
       modelSupport,
       modelCatalog,

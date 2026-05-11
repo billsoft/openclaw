@@ -4,7 +4,13 @@ import { describe, expect, it } from "vitest";
 import { createTempHomeEnv } from "./temp-home.js";
 
 async function expectPathMissing(targetPath: string): Promise<void> {
-  await expect(fs.stat(targetPath)).rejects.toMatchObject({ code: "ENOENT" });
+  try {
+    await fs.stat(targetPath);
+  } catch (error) {
+    expect((error as NodeJS.ErrnoException).code).toBe("ENOENT");
+    return;
+  }
+  throw new Error(`expected ${targetPath} to be removed`);
 }
 
 describe("createTempHomeEnv", () => {
@@ -17,9 +23,8 @@ describe("createTempHomeEnv", () => {
     expect(process.env.HOME).toBe(tempHome.home);
     expect(process.env.USERPROFILE).toBe(tempHome.home);
     expect(process.env.OPENCLAW_STATE_DIR).toBe(path.join(tempHome.home, ".openclaw"));
-    await expect(fs.stat(tempHome.home)).resolves.toMatchObject({
-      isDirectory: expect.any(Function),
-    });
+    const homeStat = await fs.stat(tempHome.home);
+    expect(homeStat.isDirectory()).toBe(true);
 
     await tempHome.restore();
 
