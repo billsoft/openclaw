@@ -5,6 +5,7 @@ import type { MatrixRoomInfo } from "./room-info.js";
 
 type DirectRoomTrackerOptions = {
   canPromoteRecentInvite?: (roomId: string) => boolean | Promise<boolean>;
+  canPromoteUnmappedStrictRoom?: (roomId: string) => boolean | Promise<boolean>;
   shouldKeepLocallyPromotedDirectRoom?:
     | ((roomId: string) => boolean | undefined | Promise<boolean | undefined>)
     | undefined;
@@ -417,11 +418,19 @@ describe("monitorMatrixProvider", () => {
   }
 
   function mockCallArg(mock: { mock: { calls: unknown[][] } }, index = 0, argIndex = 0): unknown {
-    const call = mock.mock.calls[index];
+    const call = mock.mock.calls.at(index);
     if (!call) {
       throw new Error(`expected mock call ${index}`);
     }
     return call[argIndex];
+  }
+
+  function directRoomTrackerOptions(): DirectRoomTrackerOptions {
+    const opts = mockCallArg(hoisted.createDirectRoomTracker, 0, 1);
+    if (!opts || typeof opts !== "object") {
+      throw new Error("expected direct room tracker options");
+    }
+    return opts as DirectRoomTrackerOptions;
   }
 
   function lastMockCallArg(mock: { mock: { calls: unknown[][] } }, argIndex = 0): unknown {
@@ -810,10 +819,18 @@ describe("monitorMatrixProvider", () => {
   it("resolves text chunk limit for the effective Matrix account", async () => {
     await startMonitorAndAbortAfterStartup();
 
-    const textLimitCall = hoisted.resolveTextChunkLimit.mock.calls[0];
-    expect(textLimitCall?.[0]).toBeDefined();
-    expect(textLimitCall?.[1]).toBe("matrix");
-    expect(textLimitCall?.[2]).toBe("default");
+    expect(mockCallArg(hoisted.resolveTextChunkLimit, 0, 0)).toEqual({
+      channels: {
+        matrix: {
+          dm: {
+            allowFrom: [],
+          },
+          groupAllowFrom: [],
+        },
+      },
+    });
+    expect(mockCallArg(hoisted.resolveTextChunkLimit, 0, 1)).toBe("matrix");
+    expect(mockCallArg(hoisted.resolveTextChunkLimit, 0, 2)).toBe("default");
   });
 
   it("starts monitoring without waiting for best-effort deviceId backfill", async () => {
@@ -928,7 +945,7 @@ describe("monitorMatrixProvider", () => {
   it("wires recent-invite promotion to fail closed when room metadata is unresolved", async () => {
     await startMonitorAndAbortAfterStartup();
 
-    const trackerOpts = hoisted.createDirectRoomTracker.mock.calls[0]?.[1];
+    const trackerOpts = directRoomTrackerOptions();
     if (!trackerOpts?.canPromoteRecentInvite) {
       throw new Error("recent invite promotion callback was not wired");
     }
@@ -945,7 +962,7 @@ describe("monitorMatrixProvider", () => {
   it("wires recent-invite promotion to reject named rooms", async () => {
     await startMonitorAndAbortAfterStartup();
 
-    const trackerOpts = hoisted.createDirectRoomTracker.mock.calls[0]?.[1];
+    const trackerOpts = directRoomTrackerOptions();
     if (!trackerOpts?.canPromoteRecentInvite) {
       throw new Error("recent invite promotion callback was not wired");
     }
@@ -967,7 +984,7 @@ describe("monitorMatrixProvider", () => {
 
     await startMonitorAndAbortAfterStartup();
 
-    const trackerOpts = hoisted.createDirectRoomTracker.mock.calls[0]?.[1];
+    const trackerOpts = directRoomTrackerOptions();
     if (!trackerOpts?.canPromoteRecentInvite) {
       throw new Error("recent invite promotion callback was not wired");
     }
@@ -981,10 +998,44 @@ describe("monitorMatrixProvider", () => {
     await expect(trackerOpts.canPromoteRecentInvite("!room:example.org")).resolves.toBe(false);
   });
 
+  it("does not wire unmapped strict room promotion for per-user DM scope", async () => {
+    await startMonitorAndAbortAfterStartup();
+
+    const trackerOpts = directRoomTrackerOptions();
+
+    expect(trackerOpts?.canPromoteUnmappedStrictRoom).toBeUndefined();
+  });
+
+  it("wires per-room unmapped strict room promotion through the room metadata gate", async () => {
+    hoisted.accountConfig.dm = { sessionScope: "per-room" };
+
+    await startMonitorAndAbortAfterStartup();
+
+    const trackerOpts = directRoomTrackerOptions();
+    if (!trackerOpts?.canPromoteUnmappedStrictRoom) {
+      throw new Error("per-room strict fallback callback was not wired");
+    }
+
+    hoisted.getRoomInfo.mockResolvedValueOnce({
+      altAliases: [],
+      nameResolved: true,
+      aliasesResolved: true,
+    });
+    await expect(trackerOpts.canPromoteUnmappedStrictRoom("!dm:example.org")).resolves.toBe(true);
+
+    hoisted.getRoomInfo.mockResolvedValueOnce({
+      name: "Ops Room",
+      altAliases: [],
+      nameResolved: true,
+      aliasesResolved: true,
+    });
+    await expect(trackerOpts.canPromoteUnmappedStrictRoom("!ops:example.org")).resolves.toBe(false);
+  });
+
   it("treats unresolved room metadata as indeterminate for local promotion revalidation", async () => {
     await startMonitorAndAbortAfterStartup();
 
-    const trackerOpts = hoisted.createDirectRoomTracker.mock.calls[0]?.[1];
+    const trackerOpts = directRoomTrackerOptions();
     if (!trackerOpts?.shouldKeepLocallyPromotedDirectRoom) {
       throw new Error("local promotion revalidation callback was not wired");
     }

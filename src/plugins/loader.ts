@@ -122,6 +122,7 @@ import {
 } from "./plugin-scope.js";
 import { ensureOpenClawPluginSdkAlias } from "./plugin-sdk-dist-alias.js";
 import { createEmptyPluginRegistry } from "./registry-empty.js";
+import type { PluginRegistryParams } from "./registry-types.js";
 import { createPluginRegistry, type PluginRecord, type PluginRegistry } from "./registry.js";
 import {
   getActivePluginRegistry,
@@ -169,6 +170,7 @@ export type PluginLoadOptions = {
   logger?: PluginLogger;
   coreGatewayHandlers?: Record<string, GatewayRequestHandler>;
   coreGatewayMethodNames?: readonly string[];
+  hostServices?: PluginRegistryParams["hostServices"];
   runtimeOptions?: CreatePluginRuntimeOptions;
   pluginSdkResolution?: PluginSdkResolutionPreference;
   cache?: boolean;
@@ -1437,6 +1439,20 @@ function resolvePluginModuleExport(moduleExport: unknown): {
   return {};
 }
 
+function kindIncludes(kind: unknown, target: string): boolean {
+  return kind === target || (Array.isArray(kind) && kind.includes(target));
+}
+
+function formatBundledChannelWrongLoaderError(kind: unknown): string | null {
+  if (kindIncludes(kind, "bundled-channel-setup-entry")) {
+    return "bundled channel setup entry requires setup-runtime loader";
+  }
+  if (kindIncludes(kind, "bundled-channel-entry")) {
+    return "bundled channel entry requires setup-runtime loader";
+  }
+  return null;
+}
+
 function pushDiagnostics(diagnostics: PluginDiagnostic[], append: PluginDiagnostic[]) {
   diagnostics.push(...append);
 }
@@ -1647,6 +1663,9 @@ export function loadOpenClawPlugins(options: PluginLoadOptions = {}): PluginRegi
       ...(options.coreGatewayMethodNames !== undefined && {
         coreGatewayMethodNames: options.coreGatewayMethodNames,
       }),
+      ...(options.hostServices !== undefined && {
+        hostServices: options.hostServices,
+      }),
       activateGlobalSideEffects: shouldActivate,
     });
 
@@ -1693,6 +1712,7 @@ export function loadOpenClawPlugins(options: PluginLoadOptions = {}): PluginRegi
     const provenance = buildProvenanceIndex({
       normalizedLoadPaths: normalized.loadPaths,
       env,
+      installRecords,
     });
 
     const manifestByRoot = new Map(
@@ -2335,8 +2355,16 @@ export function loadOpenClawPlugins(options: PluginLoadOptions = {}): PluginRegi
       }
 
       if (typeof register !== "function") {
-        logger.error(`[plugins] ${record.id} missing register/activate export`);
-        pushPluginLoadError(formatMissingPluginRegisterError(mod, env));
+        const bundledChannelWrongLoaderError = formatBundledChannelWrongLoaderError(record.kind);
+        if (bundledChannelWrongLoaderError) {
+          logger.error(
+            `[plugins] ${record.id} ${bundledChannelWrongLoaderError}; ensure plugin is loaded via bundled channel discovery, not legacy plugin loader`,
+          );
+          pushPluginLoadError(bundledChannelWrongLoaderError);
+        } else {
+          logger.error(`[plugins] ${record.id} missing register/activate export`);
+          pushPluginLoadError(formatMissingPluginRegisterError(mod, env));
+        }
         continue;
       }
 
@@ -2529,6 +2557,7 @@ export async function loadOpenClawPluginCliRegistry(
   const provenance = buildProvenanceIndex({
     normalizedLoadPaths: normalized.loadPaths,
     env,
+    installRecords,
   });
   const manifestByRoot = new Map(
     manifestRegistry.plugins.map((record) => [record.rootDir, record]),
@@ -2788,8 +2817,16 @@ export async function loadOpenClawPluginCliRegistry(
     }
 
     if (typeof register !== "function") {
-      logger.error(`[plugins] ${record.id} missing register/activate export`);
-      pushPluginLoadError(formatMissingPluginRegisterError(mod, env));
+      const bundledChannelWrongLoaderError = formatBundledChannelWrongLoaderError(record.kind);
+      if (bundledChannelWrongLoaderError) {
+        logger.error(
+          `[plugins] ${record.id} ${bundledChannelWrongLoaderError}; ensure plugin is loaded via bundled channel discovery, not legacy plugin loader`,
+        );
+        pushPluginLoadError(bundledChannelWrongLoaderError);
+      } else {
+        logger.error(`[plugins] ${record.id} missing register/activate export`);
+        pushPluginLoadError(formatMissingPluginRegisterError(mod, env));
+      }
       continue;
     }
 

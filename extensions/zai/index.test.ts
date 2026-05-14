@@ -1,5 +1,5 @@
-import type { StreamFn } from "@mariozechner/pi-agent-core";
-import type { Context, Model } from "@mariozechner/pi-ai";
+import type { StreamFn } from "@earendil-works/pi-agent-core";
+import type { Context, Model } from "@earendil-works/pi-ai";
 import { registerSingleProviderPlugin } from "openclaw/plugin-sdk/plugin-test-runtime";
 import { buildOpenAICompletionsParams } from "openclaw/plugin-sdk/provider-transport-runtime";
 import { describe, expect, it } from "vitest";
@@ -24,9 +24,11 @@ function expectReplayPolicyFields(
   policy: Record<string, unknown> | undefined,
   fields: Record<string, unknown>,
 ): void {
-  expect(policy).toBeDefined();
+  if (!policy) {
+    throw new Error("Expected replay policy");
+  }
   for (const [key, value] of Object.entries(fields)) {
-    expect(policy?.[key]).toEqual(value);
+    expect(policy[key]).toEqual(value);
   }
 }
 
@@ -34,9 +36,11 @@ function expectModelFields(
   model: Record<string, unknown> | undefined,
   fields: Record<string, unknown>,
 ): void {
-  expect(model).toBeDefined();
+  if (!model) {
+    throw new Error("Expected provider model");
+  }
   for (const [key, value] of Object.entries(fields)) {
-    expect(model?.[key]).toEqual(value);
+    expect(model[key]).toEqual(value);
   }
 }
 

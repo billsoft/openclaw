@@ -1,12 +1,8 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import type { AgentMessage } from "@mariozechner/pi-agent-core";
-import {
-  createAgentSession,
-  DefaultResourceLoader,
-  SessionManager,
-} from "@mariozechner/pi-coding-agent";
+import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import { createAgentSession, SessionManager } from "@earendil-works/pi-coding-agent";
 import { isAcpRuntimeSpawnAvailable } from "../../../acp/runtime/availability.js";
 import { buildHierarchyReinforcementMessage } from "../../../auto-reply/handoff-summarizer.js";
 import { filterHeartbeatPairs } from "../../../auto-reply/heartbeat-filter.js";
@@ -129,6 +125,7 @@ import {
 import {
   resolveEffectiveToolPolicy,
   resolveGroupToolPolicy,
+  resolveInheritedToolPolicyForSession,
   resolveSubagentToolPolicyForSession,
 } from "../../pi-tools.policy.js";
 import { wrapStreamFnTextTransforms } from "../../plugin-text-transforms.js";
@@ -223,6 +220,7 @@ import {
   validateReplayTurns,
 } from "../replay-history.js";
 import { observeReplayMetadata, replayMetadataFromState } from "../replay-state.js";
+import { createEmbeddedPiResourceLoader } from "../resource-loader.js";
 import {
   clearActiveEmbeddedRun,
   type EmbeddedPiQueueHandle,
@@ -362,7 +360,7 @@ import {
   shouldPreemptivelyCompactBeforePrompt,
 } from "./preemptive-compaction.js";
 import {
-  buildCurrentTurnPromptContextPrefix,
+  buildCurrentTurnPrompt,
   buildRuntimeContextSystemContext,
   queueRuntimeContextForNextTurn,
   resolveRuntimeContextPromptParts,
@@ -539,6 +537,15 @@ export function isPrimaryBootstrapRun(sessionKey?: string): boolean {
   return !isSubagentSessionKey(sessionKey) && !isAcpSessionKey(sessionKey);
 }
 
+function isRelativePathInsideOrEqual(relativePath: string): boolean {
+  return (
+    relativePath === "" ||
+    (relativePath !== ".." &&
+      !relativePath.startsWith(`..${path.sep}`) &&
+      !path.isAbsolute(relativePath))
+  );
+}
+
 export function remapInjectedContextFilesToWorkspace(params: {
   files: EmbeddedContextFile[];
   sourceWorkspaceDir: string;
@@ -549,7 +556,7 @@ export function remapInjectedContextFilesToWorkspace(params: {
   }
   return params.files.map((file) => {
     const relative = path.relative(params.sourceWorkspaceDir, file.path);
-    const canRemap = relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+    const canRemap = isRelativePathInsideOrEqual(relative);
     return canRemap
       ? {
           ...file,
@@ -766,6 +773,13 @@ function collectAttemptExplicitToolAllowlistSources(params: {
           store: subagentStore,
         })
       : undefined;
+  const inheritedToolPolicy = resolveInheritedToolPolicyForSession(
+    params.config,
+    params.sandboxSessionKey,
+    {
+      store: subagentStore,
+    },
+  );
   return collectExplicitToolAllowlistSources([
     { label: "tools.allow", allow: globalPolicy?.allow },
     { label: "tools.byProvider.allow", allow: globalProviderPolicy?.allow },
@@ -780,6 +794,7 @@ function collectAttemptExplicitToolAllowlistSources(params: {
     { label: "group tools.allow", allow: groupPolicy?.allow },
     { label: "sandbox tools.allow", allow: params.sandboxToolPolicy?.allow },
     { label: "subagent tools.allow", allow: subagentPolicy?.allow },
+    { label: "inherited tools.allow", allow: inheritedToolPolicy?.allow },
     { label: "runtime toolsAllow", allow: params.toolsAllow, enforceWhenToolsDisabled: true },
   ]);
 }
@@ -1040,7 +1055,7 @@ export async function runEmbeddedAttempt(
             currentThreadTs: params.currentThreadTs,
             currentMessageId: params.currentMessageId,
             includeCoreTools: toolConstructionPlan.includeCoreTools,
-            includeToolSearchControls: true,
+            includeToolSearchControls: toolSearchControlsEnabledForRun,
             toolSearchCatalogExecutor: (toolParams) => {
               if (!toolSearchCatalogExecutor) {
                 throw new Error("Tool Search catalog executor is unavailable for this run.");
@@ -1715,7 +1730,7 @@ export async function runEmbeddedAttempt(
         modelId: params.modelId,
         model: params.model,
       });
-      const resourceLoader = new DefaultResourceLoader({
+      const resourceLoader = createEmbeddedPiResourceLoader({
         cwd: resolvedWorkspace,
         agentDir,
         settingsManager,
@@ -2585,10 +2600,9 @@ export async function runEmbeddedAttempt(
         await flushPendingToolResultsAfterIdle({
           agent: activeSession?.agent,
           sessionManager,
-          clearPendingOnTimeout: true,
           // PERF: If the run was aborted during the setup,
-          // skip the idle wait and clear pending results synchronously so we can
-          // immediately dispose the session and throw the error without blocking.
+          // skip the idle wait and flush pending results synchronously so we can
+          // immediately dispose the session without orphaning tool calls.
           ...(params.abortSignal?.aborted ? { timeoutMs: 0 } : {}),
         });
         activeSession.dispose();
@@ -2666,6 +2680,7 @@ export async function runEmbeddedAttempt(
           blockReplyChunking: params.blockReplyChunking,
           onPartialReply: params.onPartialReply,
           onAssistantMessageStart: params.onAssistantMessageStart,
+          onExecutionPhase: params.onExecutionPhase,
           onAgentEvent: params.onAgentEvent,
           onBeforeLifecycleTerminal: () => {
             // Clear embedded-run activity before emitting terminal lifecycle events so
@@ -2699,6 +2714,7 @@ export async function runEmbeddedAttempt(
         getSuccessfulCronAdds,
         getReplayState,
         didSendViaMessagingTool,
+        didSendDeterministicApprovalPrompt,
         getLastToolError,
         setTerminalLifecycleMeta,
         getUsageTotals,
@@ -3118,12 +3134,10 @@ export async function runEmbeddedAttempt(
             effectivePrompt,
             transcriptPrompt: effectiveTranscriptPrompt,
           });
-          const currentTurnPromptContextPrefix = promptSubmission.runtimeOnly
-            ? ""
-            : buildCurrentTurnPromptContextPrefix(params.currentTurnContext);
-          const promptForModel = [currentTurnPromptContextPrefix, promptSubmission.prompt]
-            .filter(Boolean)
-            .join("\n\n");
+          const promptForModel = buildCurrentTurnPrompt({
+            context: promptSubmission.runtimeOnly ? undefined : params.currentTurnContext,
+            prompt: promptSubmission.prompt,
+          });
           const runtimeSystemContext = promptSubmission.runtimeSystemContext?.trim();
           if (promptSubmission.runtimeOnly && runtimeSystemContext) {
             const runtimeSystemPrompt = composeSystemPromptWithHookContext({
@@ -3406,6 +3420,7 @@ export async function runEmbeddedAttempt(
                     normalizeMessagesForLlmBoundary(activeSession.messages),
                   ),
                   imagesCount: imageResult.images.length,
+                  tools: tools,
                 },
                 {
                   runId: params.runId,
@@ -4095,6 +4110,7 @@ export async function runEmbeddedAttempt(
         currentAttemptAssistant,
         lastToolError: getLastToolError?.(),
         didSendViaMessagingTool: didSendViaMessagingTool(),
+        didSendDeterministicApprovalPrompt: didSendDeterministicApprovalPrompt(),
         messagingToolSentTexts: getMessagingToolSentTexts(),
         messagingToolSentMediaUrls: getMessagingToolSentMediaUrls(),
         messagingToolSentTargets: getMessagingToolSentTargets(),
@@ -4168,6 +4184,8 @@ export async function runEmbeddedAttempt(
           bundleMcpRuntime,
           bundleLspRuntime,
           sessionLock,
+          // PERF: If the run was aborted (user stop, timeout, etc.), skip the idle wait
+          // and flush pending results synchronously so we can release the session lock ASAP.
           aborted: cleanupAborted,
           abortSettlePromise: cleanupAborted ? buildAbortSettlePromise() : null,
           runId: params.runId,

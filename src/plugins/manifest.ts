@@ -488,6 +488,11 @@ export type PluginManifestProviderAuthChoice = {
   groupId?: string;
   groupLabel?: string;
   groupHint?: string;
+  /**
+   * Surface this group in the featured tier of the interactive onboarding
+   * picker. Featured groups appear before the "More…" entry.
+   */
+  onboardingFeatured?: boolean;
   /** Optional CLI flag metadata for one-flag auth flows such as API keys. */
   optionKey?: string;
   cliFlag?: string;
@@ -1354,6 +1359,7 @@ function normalizeProviderAuthChoices(
     const groupId = normalizeOptionalString(entry.groupId) ?? "";
     const groupLabel = normalizeOptionalString(entry.groupLabel) ?? "";
     const groupHint = normalizeOptionalString(entry.groupHint) ?? "";
+    const onboardingFeatured = entry.onboardingFeatured === true;
     const optionKey = normalizeOptionalString(entry.optionKey) ?? "";
     const cliFlag = normalizeOptionalString(entry.cliFlag) ?? "";
     const cliOption = normalizeOptionalString(entry.cliOption) ?? "";
@@ -1374,6 +1380,7 @@ function normalizeProviderAuthChoices(
       ...(groupId ? { groupId } : {}),
       ...(groupLabel ? { groupLabel } : {}),
       ...(groupHint ? { groupHint } : {}),
+      ...(onboardingFeatured ? { onboardingFeatured: true } : {}),
       ...(optionKey ? { optionKey } : {}),
       ...(cliFlag ? { cliFlag } : {}),
       ...(cliOption ? { cliOption } : {}),
