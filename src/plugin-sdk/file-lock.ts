@@ -2,7 +2,6 @@ import {
   acquireFileLock as acquireFsSafeFileLock,
   drainFileLockManagerForTest,
   resetFileLockManagerForTest,
-  withFileLock as withFsSafeFileLock,
 } from "@openclaw/fs-safe/file-lock";
 import { isPidAlive } from "../shared/pid-alive.js";
 
