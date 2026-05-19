@@ -463,6 +463,7 @@ export type PluginManifestCapabilityProviderMetadata = {
   authProviders?: string[];
   authSignals?: PluginManifestCapabilityProviderAuthSignal[];
   configSignals?: PluginManifestCapabilityProviderConfigSignal[];
+  referenceAudioInputs?: boolean;
 };
 
 export type PluginManifestToolMetadata = PluginManifestCapabilityProviderMetadata & {
@@ -739,11 +740,13 @@ function normalizeCapabilityProviderMetadataEntry(
   const authProviders = normalizeTrimmedStringList(rawMetadata.authProviders);
   const authSignals = normalizeCapabilityProviderAuthSignals(rawMetadata.authSignals);
   const configSignals = normalizeCapabilityProviderConfigSignals(rawMetadata.configSignals);
+  const referenceAudioInputs = rawMetadata.referenceAudioInputs === true ? true : undefined;
   const metadata = {
     ...(aliases.length > 0 ? { aliases } : {}),
     ...(authProviders.length > 0 ? { authProviders } : {}),
     ...(authSignals ? { authSignals } : {}),
     ...(configSignals ? { configSignals } : {}),
+    ...(referenceAudioInputs ? { referenceAudioInputs } : {}),
   } satisfies PluginManifestCapabilityProviderMetadata;
   return Object.keys(metadata).length > 0 ? metadata : undefined;
 }
