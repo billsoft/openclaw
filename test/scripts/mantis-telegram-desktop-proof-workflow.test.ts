@@ -48,19 +48,6 @@ type Workflow = {
   permissions?: Record<string, string>;
 };
 
-type PackageJson = {
-  packageManager?: string;
-};
-
-function repositoryPnpmMajor(): string {
-  const packageJson = JSON.parse(readFileSync(PACKAGE_JSON, "utf8")) as PackageJson;
-  const major = packageJson.packageManager?.match(/^pnpm@(\d+)\./)?.[1];
-  if (!major) {
-    throw new Error(`Missing pnpm packageManager pin in ${PACKAGE_JSON}`);
-  }
-  return major;
-}
-
 function workflowStep(name: string): WorkflowStep {
   const workflow = parse(readFileSync(WORKFLOW, "utf8")) as Workflow;
   const steps = workflow.jobs?.run_telegram_desktop_proof?.steps ?? [];
@@ -89,13 +76,12 @@ function filesUnder(root: string): string[] {
 }
 
 describe("Mantis Telegram Desktop proof workflow", () => {
-  it("runs with the repository pnpm major", () => {
+  it("uses repository pnpm setup defaults", () => {
     const workflow = parse(readFileSync(WORKFLOW, "utf8")) as Workflow;
     const liveWorkflow = parse(readFileSync(LIVE_WORKFLOW, "utf8")) as Workflow;
-    const pnpmMajor = repositoryPnpmMajor();
 
-    expect(workflow.env?.PNPM_VERSION?.split(".", 1)[0]).toBe(pnpmMajor);
-    expect(liveWorkflow.env?.PNPM_VERSION?.split(".", 1)[0]).toBe(pnpmMajor);
+    expect(workflow.env?.PNPM_VERSION).toBeUndefined();
+    expect(liveWorkflow.env?.PNPM_VERSION).toBeUndefined();
   });
 
   it("serializes all Mantis Telegram account runs without workflow concurrency cancellation", () => {
@@ -155,11 +141,30 @@ describe("Mantis Telegram Desktop proof workflow", () => {
     expect(cleanupStep.env?.OPENCLAW_QA_CONVEX_SITE_URL).toContain(
       "secrets.OPENCLAW_QA_CONVEX_SITE_URL",
     );
+    expect(cleanupStep.env?.CRABBOX_PROVIDER).toContain(
+      "needs.resolve_request.outputs.crabbox_provider",
+    );
     expect(cleanupStep.run).toContain("sudo find .artifacts/qa-e2e");
+    expect(cleanupStep.run).toContain("*/telegram-user-crabbox/*/session.json");
+    expect(cleanupStep.run).toContain("telegram-user-crabbox-proof.ts");
+    expect(cleanupStep.run).toContain(
+      'finish --session "$session_file" --preview-crop telegram-window',
+    );
     expect(cleanupStep.run).toContain("*/telegram-user-crabbox/*/.session/lease.json");
     expect(cleanupStep.run).toContain("telegram-user-credential.ts");
     expect(cleanupStep.run).toContain("release --lease-file");
+    expect(cleanupStep.run).toContain("status=1");
     expect(cleanupStep.run).toContain("sudo -u codex env");
+  });
+
+  it("cleans partially started proof daemons when local SUT startup fails", () => {
+    const proofScript = readFileSync(PROOF_SCRIPT, "utf8");
+
+    expect(proofScript).toContain("let mockPid: number | undefined;");
+    expect(proofScript).toContain("let gatewayPid: number | undefined;");
+    expect(proofScript).toContain("killPidTree(gatewayPid);");
+    expect(proofScript).toContain("killPidTree(mockPid);");
+    expect(proofScript).toContain("throw error;");
   });
 
   it("uses the OpenClaw Mantis mention as the comment trigger", () => {

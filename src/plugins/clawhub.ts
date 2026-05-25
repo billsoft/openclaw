@@ -33,6 +33,7 @@ import {
 import { formatErrorMessage } from "../infra/errors.js";
 import { normalizeOptionalString } from "../shared/string-coerce.js";
 import { resolveCompatibilityHostVersion } from "../version.js";
+import type { RuntimeVersionEnv } from "../version.js";
 import type { ClawHubPluginInstallRecordFields } from "./clawhub-install-records.js";
 import type { InstallSafetyOverrides } from "./install-security-scan.js";
 import { installPluginFromArchive, type InstallPluginResult } from "./install.js";
@@ -1058,6 +1059,7 @@ export async function installPluginFromClawHub(
     timeoutMs?: number;
     dryRun?: boolean;
     expectedPluginId?: string;
+    env?: RuntimeVersionEnv;
   },
 ): Promise<
   | ({
@@ -1102,7 +1104,7 @@ export async function installPluginFromClawHub(
   if (!versionState.ok) {
     return versionState;
   }
-  const runtimeVersion = resolveCompatibilityHostVersion();
+  const runtimeVersion = resolveCompatibilityHostVersion(params.env);
   const validationFailure = validateClawHubPluginPackage({
     detail,
     compatibility: versionState.compatibility,

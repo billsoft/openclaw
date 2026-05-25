@@ -162,7 +162,12 @@ class ConnectionManager(
   fun buildOperatorConnectOptions(): GatewayConnectOptions =
     GatewayConnectOptions(
       role = "operator",
-      scopes = listOf("operator.read", "operator.write", "operator.talk.secrets"),
+      scopes =
+        listOf(
+          "operator.approvals",
+          "operator.read",
+          "operator.write",
+        ),
       caps = emptyList(),
       commands = emptyList(),
       permissions = emptyMap(),
