@@ -34,6 +34,7 @@ import {
   resolvePluginSdkLightIncludePattern,
 } from "../test/vitest/vitest.plugin-sdk-paths.mjs";
 import { fullSuiteVitestShards } from "../test/vitest/vitest.test-shards.mjs";
+import { isUnitUiTestTarget } from "../test/vitest/vitest.ui-paths.mjs";
 import { resolveUnitFastTestIncludePattern } from "../test/vitest/vitest.unit-fast-paths.mjs";
 import {
   isBoundaryTestFile,
@@ -559,7 +560,7 @@ const GENERATED_CHANGED_TEST_TARGET_PATTERNS = [
   /^extensions\/[^/]+\/src\/host\/.+\/\.bundle\.hash$/u,
   /^extensions\/[^/]+\/src\/host\/.+\/[^/]+\.bundle\.js$/u,
 ];
-const SOURCE_ROOTS_FOR_IMPORT_GRAPH = ["src", "extensions", "packages", "ui/src", "test"];
+const SOURCE_ROOTS_FOR_IMPORT_GRAPH = ["src", "extensions", "packages", "ui/src", "ui/config", "test"];
 const IMPORTABLE_FILE_EXTENSIONS = [".ts", ".tsx", ".mts", ".cts"];
 const IMPORT_SPECIFIER_PATTERN =
   /\b(?:import|export)\s+(?:type\s+)?(?:[^'"]*?\s+from\s+)?["']([^"']+)["']|\bimport\s*\(\s*["']([^"']+)["']\s*\)/gu;
@@ -1126,23 +1127,6 @@ function isVitestConfigTargetForKind(kind, targetArg, cwd) {
   return resolveVitestConfigTargetKind(toRepoRelativeTarget(targetArg, cwd)) === kind;
 }
 
-function isUnitUiTestTarget(relative) {
-  if (!relative.endsWith(".test.ts")) {
-    return false;
-  }
-  return (
-    relative === "ui/src/ui/app-chat.test.ts" ||
-    relative.startsWith("ui/src/ui/chat/") ||
-    relative === "ui/src/ui/views/agents-utils.test.ts" ||
-    relative === "ui/src/ui/views/channels.test.ts" ||
-    relative === "ui/src/ui/views/chat.test.ts" ||
-    relative === "ui/src/ui/views/dreaming.test.ts" ||
-    relative === "ui/src/ui/views/usage-render-details.test.ts" ||
-    relative === "ui/src/ui/controllers/agents.test.ts" ||
-    relative === "ui/src/ui/controllers/chat.test.ts"
-  );
-}
-
 function isControlUiE2eTarget(relative) {
   return (
     relative === "ui/src/test-helpers/control-ui-e2e.ts" ||
@@ -1301,7 +1285,7 @@ function resolvePreciseChangedTestTargets(changedPath, options) {
   if (siblingTest) {
     return [siblingTest];
   }
-  if (/^(?:src|test\/helpers|extensions|packages|ui\/src)\//u.test(changedPath)) {
+  if (/^(?:src|test\/helpers|extensions|packages|ui\/src|ui\/config)\//u.test(changedPath)) {
     const affectedTests = resolveAffectedTestsFromImportGraph(changedPath, cwd);
     if (affectedTests.length > 0) {
       return affectedTests;
