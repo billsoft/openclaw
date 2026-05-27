@@ -24,6 +24,11 @@ import type { NormalizedUsage } from "./usage.js";
 
 type EmbeddedSubscribeLogger = {
   debug: (message: string, meta?: Record<string, unknown>) => void;
+  trace?: (message: string, meta?: Record<string, unknown>) => void;
+  isEnabled?: (
+    level: "trace" | "debug" | "info" | "warn" | "error" | "fatal",
+    target?: "any" | "console" | "file",
+  ) => boolean;
   info: (message: string, meta?: Record<string, unknown>) => void;
   warn: (message: string, meta?: Record<string, unknown>) => void;
 };
@@ -132,6 +137,7 @@ export type EmbeddedPiSubscribeContext = {
   blockChunker: EmbeddedBlockChunker | null;
   hookRunner?: HookRunner;
   builtinToolNames?: ReadonlySet<string>;
+  trustedLocalMediaToolNames?: ReadonlySet<string>;
   noteLastAssistant: (msg: AgentMessage) => void;
 
   shouldEmitToolResult: () => boolean;
@@ -244,6 +250,7 @@ export type ToolHandlerContext = {
   log: EmbeddedSubscribeLogger;
   hookRunner?: HookRunner;
   builtinToolNames?: ReadonlySet<string>;
+  trustedLocalMediaToolNames?: ReadonlySet<string>;
   flushBlockReplyBuffer: () => void | Promise<void>;
   shouldEmitToolResult: () => boolean;
   shouldEmitToolOutput: () => boolean;
