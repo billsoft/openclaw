@@ -22,6 +22,7 @@ import {
   validatePluginCommandDefinition,
 } from "./command-registration.js";
 import {
+  canExposeSenderIsOwner,
   isTrustedReservedCommandOwner,
   listRegisteredPluginAgentPromptGuidance,
   pluginCommands,
@@ -178,12 +179,14 @@ type PluginCommandLlmCompleteParams = Parameters<
 function buildPluginCommandRuntimeContext(params: {
   command: RegisteredPluginCommand;
   config: OpenClawConfig;
+  agentId?: string;
   sessionKey?: string;
   authProfileId?: string;
 }): PluginCommandContext["runtimeContext"] {
   const sessionKey = params.sessionKey?.trim();
   const agentId = resolveBoundAgentIdForSession({
     config: params.config,
+    agentId: params.agentId,
     sessionKey,
   });
   if (!sessionKey && !agentId) {
@@ -231,6 +234,8 @@ export async function executePluginCommand(params: {
   isAuthorizedSender: boolean;
   senderIsOwner?: boolean;
   gatewayClientScopes?: PluginCommandContext["gatewayClientScopes"];
+  /** Host-resolved agent authority for plugin-owned or non-agent-shaped session keys. */
+  agentId?: string;
   sessionKey?: PluginCommandContext["sessionKey"];
   sessionId?: PluginCommandContext["sessionId"];
   sessionFile?: PluginCommandContext["sessionFile"];
@@ -303,7 +308,7 @@ export async function executePluginCommand(params: {
   });
   const effectiveAccountId = bindingConversation?.accountId ?? params.accountId;
   const senderIsOwnerForCommand =
-    requiredScopes.length > 0 ||
+    canExposeSenderIsOwner(command) ||
     (isTrustedReservedCommandOwner(command) &&
       command.ownership === "reserved" &&
       isReservedCommandName(command.name) &&
@@ -354,6 +359,7 @@ export async function executePluginCommand(params: {
     runtimeContext: buildPluginCommandRuntimeContext({
       command,
       config,
+      agentId: params.agentId,
       sessionKey: params.sessionKey,
       authProfileId: params.authProfileId,
     }),

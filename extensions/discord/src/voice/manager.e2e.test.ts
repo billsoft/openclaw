@@ -2115,7 +2115,11 @@ describe("DiscordVoiceManager", () => {
 
     await manager.join({ guildId: "g1", channelId: "1001" });
 
-    expect(entersStateMock).toHaveBeenCalledWith(connection, "ready", 45_000);
+    const readyCall = entersStateMock.mock.calls[0];
+    expect(readyCall?.[0]).toBe(connection);
+    expect(readyCall?.[1]).toBe("ready");
+    expect(readyCall?.[2]).toBeGreaterThanOrEqual(44_900);
+    expect(readyCall?.[2]).toBeLessThanOrEqual(45_000);
 
     entersStateMock.mockClear();
     entersStateMock.mockRejectedValueOnce(new Error("still disconnected"));
@@ -5501,7 +5505,7 @@ describe("DiscordVoiceManager", () => {
     await vi.waitFor(() => expect(release).toHaveBeenCalledTimes(1));
   });
 
-  it("passes per-channel system prompt overrides to voice agent runs", async () => {
+  it("passes per-channel system prompt context to voice agent runs", async () => {
     const client = createClient();
     client.fetchMember.mockResolvedValue({
       nickname: "Guest Nick",

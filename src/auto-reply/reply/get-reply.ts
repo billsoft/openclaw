@@ -187,6 +187,36 @@ async function applyMediaUnderstandingIfNeeded(params: {
   }
 }
 
+async function stageRemoteInboundMediaBeforeUnderstandingIfNeeded(params: {
+  ctx: MsgContext;
+  cfg: OpenClawConfig;
+  sessionKey?: string;
+  workspaceDir: string;
+}): Promise<boolean> {
+  if (
+    !params.sessionKey ||
+    params.ctx.MediaStaged ||
+    !normalizeOptionalString(params.ctx.MediaRemoteHost) ||
+    !hasInboundMedia(params.ctx)
+  ) {
+    return false;
+  }
+
+  const { stageSandboxMedia } = await loadStageSandboxMediaRuntime();
+  const result = await stageSandboxMedia({
+    ctx: params.ctx,
+    sessionCtx: params.ctx,
+    cfg: params.cfg,
+    sessionKey: params.sessionKey,
+    workspaceDir: params.workspaceDir,
+  });
+  if (result.staged.size > 0) {
+    params.ctx.MediaStaged = true;
+    return true;
+  }
+  return false;
+}
+
 async function applyLinkUnderstandingIfNeeded(params: {
   ctx: MsgContext;
   cfg: OpenClawConfig;
@@ -387,6 +417,20 @@ export async function getReplyFromConfig(
   );
   const workspaceDir = workspace.dir;
 
+  if (
+    !isFastTestEnv &&
+    normalizeOptionalString(finalized.MediaRemoteHost) &&
+    hasInboundMedia(finalized)
+  ) {
+    await traceGetReplyPhase("reply.stage_remote_media_pre_understanding", () =>
+      stageRemoteInboundMediaBeforeUnderstandingIfNeeded({
+        ctx: finalized,
+        cfg,
+        sessionKey: agentSessionKey,
+        workspaceDir,
+      }),
+    );
+  }
   if (!isFastTestEnv && hasInboundMedia(finalized)) {
     await traceGetReplyPhase("reply.apply_media_understanding", () =>
       applyMediaUnderstandingIfNeeded({
@@ -452,9 +496,8 @@ export async function getReplyFromConfig(
   if (sessionEntry?.pendingFinalDelivery && sessionEntry.pendingFinalDeliveryText) {
     const text = sanitizePendingFinalDeliveryText(sessionEntry.pendingFinalDeliveryText);
 
-    // If it's a heartbeat, we definitely want to try delivering the lost reply now.
-    // If it's a user message, we deliver the lost reply first, then continue.
-    // For now, let's just return the lost reply if it's a heartbeat.
+    // Heartbeats may safely clear ack-only pending state, but must not replay
+    // user-facing pending finals through a different delivery target.
     if (opts?.isHeartbeat) {
       const heartbeatPending = classifyHeartbeatPendingFinalDelivery(
         text,
@@ -472,11 +515,13 @@ export async function getReplyFromConfig(
           sessionStore[sessionKey] = sessionEntry;
         }
         if (sessionKey && storePath) {
-          const { updateSessionStoreEntry } = await import("../../config/sessions.js");
-          await updateSessionStoreEntry({
+          const { applySessionStoreEntryPatch } = await import("../../config/sessions.js");
+          await applySessionStoreEntryPatch({
             storePath,
             sessionKey,
-            update: async () => ({
+            skipMaintenance: true,
+            takeCacheOwnership: true,
+            patch: {
               pendingFinalDelivery: undefined,
               pendingFinalDeliveryText: undefined,
               pendingFinalDeliveryCreatedAt: undefined,
@@ -484,37 +529,9 @@ export async function getReplyFromConfig(
               pendingFinalDeliveryAttemptCount: undefined,
               pendingFinalDeliveryLastError: undefined,
               pendingFinalDeliveryContext: undefined,
-            }),
+            },
           });
         }
-      } else {
-        const updatedAt = Date.now();
-        const attemptCount = (sessionEntry.pendingFinalDeliveryAttemptCount ?? 0) + 1;
-        sessionEntry.pendingFinalDeliveryLastAttemptAt = updatedAt;
-        sessionEntry.pendingFinalDeliveryAttemptCount = attemptCount;
-        sessionEntry.pendingFinalDeliveryLastError = null;
-        const replayText = sanitizePendingFinalDeliveryText(heartbeatPending.replayText);
-        sessionEntry.pendingFinalDeliveryText = replayText;
-        sessionEntry.updatedAt = updatedAt;
-        if (sessionKey && sessionStore) {
-          sessionStore[sessionKey] = sessionEntry;
-        }
-        if (sessionKey && storePath) {
-          const { updateSessionStoreEntry } = await import("../../config/sessions.js");
-          await updateSessionStoreEntry({
-            storePath,
-            sessionKey,
-            update: async () => ({
-              pendingFinalDeliveryText: replayText,
-              pendingFinalDeliveryLastAttemptAt: updatedAt,
-              pendingFinalDeliveryAttemptCount: attemptCount,
-              pendingFinalDeliveryLastError: null,
-              updatedAt,
-            }),
-          });
-        }
-        logResolverTiming("completed", "pending_final_delivery_replay");
-        return { text: replayText };
       }
     }
   }

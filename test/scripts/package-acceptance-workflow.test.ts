@@ -32,6 +32,10 @@ type WorkflowStep = {
 };
 
 type WorkflowJob = {
+  concurrency?: {
+    group?: string;
+    "cancel-in-progress"?: boolean | string;
+  };
   env?: Record<string, string>;
   if?: string;
   name?: string;
@@ -96,7 +100,7 @@ describe("package acceptance workflow", () => {
       "if: ${{ inputs.use-actions-cache == 'true' && runner.os != 'Windows' }}",
     );
     expect(setupPnpmAction).toContain(
-      "key: pnpm-store-${{ runner.os }}-${{ inputs.node-version }}-${{ hashFiles(inputs.lockfile-path) }}",
+      "key: pnpm-store-${{ runner.os }}-${{ runner.arch }}-${{ inputs.node-version }}-${{ hashFiles(inputs.package-manager-file) }}-${{ hashFiles(inputs.lockfile-path) }}",
     );
     expect(setupPnpmAction).not.toContain("pnpm/action-setup");
     expect(setupPnpmAction).not.toContain("shasum");
@@ -123,18 +127,64 @@ describe("package acceptance workflow", () => {
     const workflow = readWorkflow(CRABBOX_HYDRATE_WORKFLOW);
     const workflowText = readFileSync(CRABBOX_HYDRATE_WORKFLOW, "utf8");
     const hydrate = workflowJob(CRABBOX_HYDRATE_WORKFLOW, "hydrate");
+    const hydrateWindowsDaemon = workflowJob(CRABBOX_HYDRATE_WORKFLOW, "hydrate-windows-daemon");
     const hydrateGithub = workflowJob(CRABBOX_HYDRATE_WORKFLOW, "hydrate-github");
 
     expect(crabboxConfig.actions?.job).toBe("hydrate");
-    expect(hydrate.if).toBe("${{ inputs.crabbox_job != 'hydrate-github' }}");
+    expect(hydrate.if).toBe(
+      "${{ inputs.crabbox_job != 'hydrate-github' && inputs.crabbox_job != 'hydrate-windows-daemon' }}",
+    );
     expect(workflowStep(hydrate, "Setup Node.js").uses).toBe("actions/setup-node@v6");
     expect(workflowStep(hydrate, "Setup Node.js").with?.["node-version"]).toBe("24");
-    expect(workflowStep(hydrate, "Setup pnpm and dependencies").run).toContain(
-      'corepack enable --install-directory "$PNPM_HOME"',
+    const hydratePnpm = workflowStep(hydrate, "Setup pnpm and dependencies");
+    expect(hydratePnpm.if).toBeUndefined();
+    expect(hydratePnpm.run).toContain('corepack enable --install-directory "$PNPM_HOME"');
+    expect(hydratePnpm.run).toContain("COREPACK_HOME");
+    expect(workflowStep(hydrate, "Fetch main ref").run).toContain(
+      'git fetch --no-tags --depth=50 origin "+refs/heads/main:refs/remotes/origin/main"',
     );
-    expect(workflowStep(hydrate, "Setup pnpm and dependencies").run).toContain("COREPACK_HOME");
+    expect(workflowStep(hydrate, "Prepare Crabbox shell").if).toBeUndefined();
+    expect(workflowStep(hydrate, "Ensure Docker is running").if).toBeUndefined();
+    expect(workflowStep(hydrate, "Ensure SSH is available").if).toBeUndefined();
+    expect(workflowStep(hydrate, "Hydrate provider env helper").if).toBeUndefined();
     expect(workflowStep(hydrate, "Mark Crabbox ready").run).toContain("COREPACK_HOME");
     expect(workflowStep(hydrate, "Hydrate provider env helper").env).toBeUndefined();
+
+    expect(hydrateWindowsDaemon.if).toBe("${{ inputs.crabbox_job == 'hydrate-windows-daemon' }}");
+    expect(workflowStep(hydrateWindowsDaemon, "Setup Node.js").uses).toBe("actions/setup-node@v6");
+    const hydrateWindowsPnpm = workflowStep(hydrateWindowsDaemon, "Setup pnpm and dependencies");
+    expect(hydrateWindowsPnpm.shell).toBe("powershell");
+    expect(hydrateWindowsPnpm.run).toContain(
+      '$env:PNPM_CONFIG_MODULES_DIR = Join-Path $workspace "node_modules"',
+    );
+    expect(hydrateWindowsPnpm.run).not.toContain("PNPM_CONFIG_PACKAGE_IMPORT_METHOD");
+    expect(hydrateWindowsPnpm.run).toContain("--config.side-effects-cache=false");
+    expect(hydrateWindowsPnpm.run).toContain("--ignore-scripts=true");
+    expect(hydrateWindowsPnpm.run).toContain('$env:PNPM_CONFIG_CHILD_CONCURRENCY = "4"');
+    expect(hydrateWindowsPnpm.run).toContain('$env:PNPM_CONFIG_NETWORK_CONCURRENCY = "8"');
+    expect(hydrateWindowsPnpm.run).toContain('$env:PNPM_CONFIG_VERIFY_DEPS_BEFORE_RUN = "false"');
+    expect(hydrateWindowsPnpm.run).toContain(
+      "$Value | Out-File -FilePath $Path -Encoding utf8 -Append",
+    );
+    expect(hydrateWindowsPnpm.run).toContain('"--filter",');
+    expect(hydrateWindowsPnpm.run).toContain('"openclaw",');
+    expect(hydrateWindowsPnpm.run).not.toContain("Remove-Item -Recurse -Force");
+    expect(hydrateWindowsPnpm.run).not.toContain("Add-Content -Path $env:GITHUB_ENV");
+    expect(hydrateWindowsPnpm.run).not.toContain("Add-Content -Path $env:GITHUB_PATH");
+    expect(hydrateWindowsPnpm.run).toContain("corepack enable --install-directory $env:PNPM_HOME");
+    expect(hydrateWindowsPnpm.run).toContain("pnpm @installArgs");
+    expect(hydrateWindowsPnpm.run).toContain(
+      '$corepackShimDir = Join-Path $nodeBin "node_modules\\corepack\\shims"',
+    );
+    const hydrateWindowsFetch = workflowStep(hydrateWindowsDaemon, "Fetch main ref");
+    expect(hydrateWindowsFetch.shell).toBe("powershell");
+    expect(hydrateWindowsFetch.run).toContain(
+      'git fetch --no-tags --depth=50 origin "+refs/heads/main:refs/remotes/origin/main"',
+    );
+    expect(workflowStep(hydrateWindowsDaemon, "Mark Crabbox ready").shell).toBe("powershell");
+    expect(workflowStep(hydrateWindowsDaemon, "Mark Crabbox ready").run).toContain('"NODE_BIN"');
+    expect(workflowStep(hydrateWindowsDaemon, "Mark Crabbox ready").run).toContain('"PNPM_HOME"');
+    expect(workflowStep(hydrateWindowsDaemon, "Mark Crabbox ready").run).toContain('"PATH"');
     expect(workflowText).toContain("OPENCLAW_CRABBOX_HYDRATE_DOWNLOAD_TIMEOUT_SECONDS:-300");
     expect(workflowText).toContain("OPENCLAW_CRABBOX_HYDRATE_DOWNLOAD_RETRIES:-3");
     expect(workflowText).toContain("--retry-all-errors");
@@ -431,7 +481,7 @@ describe("package artifact reuse", () => {
     expect(pullHelper).toContain("timeout --kill-after=1s 1s true >/dev/null 2>&1");
     expect(pullHelper).toContain('timeout "${timeout_seconds}s" docker pull "$image"');
     expect(pullHelper).toContain(
-      'timeout command not found; cannot bound Docker pull after ${timeout_seconds}s',
+      "timeout command not found; cannot bound Docker pull after ${timeout_seconds}s",
     );
     expect(dockerE2ePlanAction.match(/bash scripts\/ci-docker-pull-retry\.sh/g)?.length).toBe(2);
     expect(dockerE2ePlanAction).not.toContain('docker pull "${OPENCLAW_DOCKER_E2E_');
@@ -535,6 +585,9 @@ describe("package artifact reuse", () => {
     expect(workflow).toMatch(
       /suite_id: native-live-src-gateway-profiles-openai[\s\S]*?timeout_minutes: 60[\s\S]*?profiles: beta minimum stable full/u,
     );
+    expect(workflow).toContain(
+      "command: OPENCLAW_LIVE_GATEWAY_PROVIDERS=openai OPENCLAW_LIVE_GATEWAY_MODELS=openai/gpt-5.5",
+    );
     expect(workflow).toMatch(
       /suite_id: native-live-src-gateway-profiles-fireworks[\s\S]*?timeout_minutes: 30[\s\S]*?advisory: true/u,
     );
@@ -551,6 +604,10 @@ describe("package artifact reuse", () => {
     expect(workflow).toContain(
       "OPENCLAW_LIVE_GATEWAY_THINKING=low OPENCLAW_LIVE_GATEWAY_PROVIDERS=openai OPENCLAW_LIVE_GATEWAY_MODELS=openai/gpt-5.5 OPENCLAW_LIVE_GATEWAY_MAX_MODELS=1 OPENCLAW_LIVE_GATEWAY_STEP_TIMEOUT_MS=90000 OPENCLAW_LIVE_GATEWAY_MODEL_TIMEOUT_MS=600000",
     );
+    expect(workflow).toContain(
+      "OPENCLAW_LIVE_GATEWAY_MODELS=anthropic/claude-sonnet-4-6,anthropic/claude-haiku-4-5 OPENCLAW_LIVE_GATEWAY_MAX_MODELS=2",
+    );
+    expect(workflow).toContain("OPENCLAW_LIVE_GATEWAY_MODEL_TIMEOUT_MS=600000");
     expect(workflow).toContain("timeout --foreground --kill-after=30s 35m");
     expect(workflow).toMatch(/suite_id: live-gateway-docker[\s\S]*?timeout_minutes: 40/u);
     expect(workflow).toContain("suite_id: native-live-extensions-a-k");
@@ -1127,9 +1184,30 @@ describe("package artifact reuse", () => {
     ]);
   });
 
+  it("lets CI Telegram consumers wait on Convex leases instead of GitHub concurrency", () => {
+    const telegramJobs = [
+      [NPM_TELEGRAM_WORKFLOW, "run_package_telegram_e2e", "Run package Telegram E2E"],
+      [RELEASE_CHECKS_WORKFLOW, "qa_live_telegram_release_checks", "Run Telegram live lane"],
+      [QA_LIVE_TRANSPORTS_WORKFLOW, "run_live_telegram", "Run Telegram live lane"],
+      [
+        ".github/workflows/mantis-telegram-live.yml",
+        "run_telegram_live",
+        "Run Telegram live scenario and capture desktop evidence",
+      ],
+    ] as const;
+
+    for (const [workflowPath, jobName, stepName] of telegramJobs) {
+      const job = workflowJob(workflowPath, jobName);
+      expect(job.concurrency).toBeUndefined();
+      const step = workflowStep(job, stepName);
+      expect(step.env?.OPENCLAW_QA_CREDENTIAL_ACQUIRE_TIMEOUT_MS).toBe("1800000");
+    }
+  });
+
   it("keeps release QA and repo E2E lanes off scarce 32-core runners", () => {
     const releaseChecksWorkflow = readFileSync(RELEASE_CHECKS_WORKFLOW, "utf8");
     const qaWorkflow = readFileSync(QA_LIVE_TRANSPORTS_WORKFLOW, "utf8");
+    const liveE2eWorkflow = readFileSync(LIVE_E2E_WORKFLOW, "utf8");
 
     for (const jobName of [
       "qa_lab_parity_lane_release_checks",
@@ -1153,6 +1231,10 @@ describe("package artifact reuse", () => {
         new RegExp(`${jobName}:[\\s\\S]*?runs-on: blacksmith-8vcpu-ubuntu-2404`, "u"),
       );
     }
+    expectTextToIncludeAll(liveE2eWorkflow, [
+      "OPENCLAW_LIVE_GATEWAY_STEP_TIMEOUT_MS=180000",
+      "OPENCLAW_LIVE_GATEWAY_MODEL_TIMEOUT_MS=600000",
+    ]);
   });
 
   it("summarizes queue time separately from execution time in full validation", () => {
@@ -1164,6 +1246,7 @@ describe("package artifact reuse", () => {
     expect(workflow).toContain("### Slowest jobs: ${label}");
     expect(workflow).toContain("### Longest queues: ${label}");
     expect(workflow).toContain("Write release validation manifest");
+    expect(workflow).toContain("PERFORMANCE_RUN_ID: ${{ needs.performance.outputs.run_id }}");
     expect(workflow).toContain("Upload release validation manifest");
     expect(workflow).toContain("Failed child detail: ${label}");
     expect(workflow).toContain("actions/runs/${run_id}/artifacts?per_page=100");
@@ -1197,10 +1280,13 @@ describe("package artifact reuse", () => {
     expect(npmWorkflow).toContain("preflight-manifest.json");
     expect(npmWorkflow).toContain("Verify full release validation run metadata");
     expect(npmWorkflow).toContain("Verify full release validation target");
-    expect(npmWorkflow).not.toContain("Verify Docker runtime-assets prune path");
+    expect(npmWorkflow).not.toContain("Build and smoke test final Docker runtime image");
     expect(fullReleaseWorkflow).toContain("docker_runtime_assets_preflight");
-    expect(fullReleaseWorkflow).toContain("Verify Docker runtime-assets prune path");
-    expect(fullReleaseWorkflow).toContain("--target runtime-assets");
+    expect(fullReleaseWorkflow).toContain("Build and smoke test final Docker runtime image");
+    expect(fullReleaseWorkflow).toContain("docker build");
+    expect(fullReleaseWorkflow).toContain("node /app/openclaw.mjs agent");
+    expect(fullReleaseWorkflow).toContain('OPENCLAW_EXTENSIONS="diagnostics-otel,codex"');
+    expect(fullReleaseWorkflow).toContain("/app/src/agents/templates/HEARTBEAT.md");
     expect(fullReleaseWorkflow).toContain("inputs.rerun_group == 'all'");
     expect(fullReleaseWorkflow).toContain(
       "needs.docker_runtime_assets_preflight.result == 'success'",
