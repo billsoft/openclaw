@@ -56,7 +56,7 @@ export function createImageProcessor() {
       rootDir: resolvePreferredOpenClawTmpDir(),
       prefix: "openclaw-img-",
     },
-    commandResolver: (command) =>
+    commandResolver: (command: string) =>
       resolveSystemBin(command, { trust: command === "powershell" ? "strict" : "standard" }),
   });
 }
@@ -82,7 +82,8 @@ export function readImageProbeFromHeader(buffer: Buffer): ImageProbe | null {
 
 function wrapRastermillUnavailable(operation: string, error: unknown): never {
   if (error instanceof RastermillUnavailableError) {
-    throw new ImageProcessorUnavailableError(operation, error.message, error.causes);
+    const rmErr = error as RastermillUnavailableError;
+    throw new ImageProcessorUnavailableError(operation, rmErr.message, rmErr.causes);
   }
   throw error;
 }
@@ -146,7 +147,7 @@ export async function hasAlphaChannel(buffer: Buffer): Promise<boolean> {
     }
     if (
       error instanceof RastermillError &&
-      error.code === "RASTERMILL_UNDECODABLE" &&
+      (error as RastermillError).code === "RASTERMILL_UNDECODABLE" &&
       readRastermillImageProbeFromHeader(buffer)
     ) {
       return headerHasAlpha;
