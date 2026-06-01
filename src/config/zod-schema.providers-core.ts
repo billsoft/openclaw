@@ -1,12 +1,12 @@
+import { isValidInboundPathRootPattern } from "@openclaw/media-core/inbound-path-policy";
+import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
 import { z } from "zod";
 import { isSafeScpRemoteHost } from "../infra/scp-host.js";
-import { isValidInboundPathRootPattern } from "../media/inbound-path-policy.js";
 import {
   normalizeCommandDescription,
   normalizeSlashCommandName,
   resolveCustomCommands,
 } from "../shared/custom-command-config.js";
-import { normalizeOptionalString } from "../shared/string-coerce.js";
 import { ToolPolicySchema } from "./zod-schema.agent-runtime.js";
 import { NativeExecApprovalEnableModeSchema } from "./zod-schema.approvals.js";
 import {
@@ -23,6 +23,7 @@ import {
   GroupPolicySchema,
   HexColorSchema,
   MarkdownConfigSchema,
+  MentionPatternsPolicySchema,
   MSTeamsReplyStyleSchema,
   ProviderCommandsSchema,
   SecretInputSchema,
@@ -102,6 +103,9 @@ const ChannelStreamingProgressSchema = z
     commandText: z.enum(["raw", "status"]).optional(),
   })
   .strict();
+const DiscordStreamingProgressSchema = ChannelStreamingProgressSchema.extend({
+  commentary: z.boolean().optional(),
+}).strict();
 const SlackStreamingProgressSchema = ChannelStreamingProgressSchema.extend({
   nativeTaskCards: z.boolean().optional(),
 }).strict();
@@ -116,6 +120,9 @@ const ChannelPreviewStreamingConfigSchema = z
   .strict();
 const TelegramPreviewStreamingConfigSchema = ChannelPreviewStreamingConfigSchema.extend({
   preview: TelegramStreamingPreviewSchema.optional(),
+}).strict();
+const DiscordPreviewStreamingConfigSchema = ChannelPreviewStreamingConfigSchema.extend({
+  progress: DiscordStreamingProgressSchema.optional(),
 }).strict();
 const SlackStreamingConfigSchema = ChannelPreviewStreamingConfigSchema.extend({
   nativeTransport: z.boolean().optional(),
@@ -265,6 +272,7 @@ export const TelegramAccountSchemaBase = z
     defaultTo: z.union([z.string(), z.number()]).optional(),
     groupAllowFrom: z.array(z.union([z.string(), z.number()])).optional(),
     groupPolicy: GroupPolicySchema.optional().default("allowlist"),
+    mentionPatterns: MentionPatternsPolicySchema.optional(),
     contextVisibility: ContextVisibilityModeSchema.optional(),
     historyLimit: z.number().int().min(0).optional(),
     dmHistoryLimit: z.number().int().min(0).optional(),
@@ -574,6 +582,8 @@ const DiscordVoiceRealtimeSchema = z
   .object({
     provider: z.string().min(1).optional(),
     model: z.string().min(1).optional(),
+    speakerVoice: z.string().min(1).optional(),
+    speakerVoiceId: z.string().min(1).optional(),
     voice: z.string().min(1).optional(),
     instructions: z.string().min(1).optional(),
     toolPolicy: DiscordVoiceRealtimeToolPolicySchema.optional(),
@@ -644,13 +654,14 @@ export const DiscordAccountSchema = z
     dangerouslyAllowNameMatching: z.boolean().optional(),
     mentionAliases: z.record(z.string(), DiscordSnowflakeStringSchema).optional(),
     groupPolicy: GroupPolicySchema.optional().default("allowlist"),
+    mentionPatterns: MentionPatternsPolicySchema.optional(),
     contextVisibility: ContextVisibilityModeSchema.optional(),
     historyLimit: z.number().int().min(0).optional(),
     dmHistoryLimit: z.number().int().min(0).optional(),
     dms: z.record(z.string(), DmConfigSchema.optional()).optional(),
     textChunkLimit: z.number().int().positive().optional(),
     suppressEmbeds: z.boolean().optional(),
-    streaming: ChannelPreviewStreamingConfigSchema.optional(),
+    streaming: DiscordPreviewStreamingConfigSchema.optional(),
     maxLinesPerMessage: z.number().int().positive().optional(),
     mediaMaxMb: z.number().positive().optional(),
     retry: RetryConfigSchema,
@@ -971,6 +982,7 @@ export const SlackAccountSchema = z
     dangerouslyAllowNameMatching: z.boolean().optional(),
     requireMention: z.boolean().optional(),
     groupPolicy: GroupPolicySchema.optional(),
+    mentionPatterns: MentionPatternsPolicySchema.optional(),
     contextVisibility: ContextVisibilityModeSchema.optional(),
     historyLimit: z.number().int().min(0).optional(),
     dmHistoryLimit: z.number().int().min(0).optional(),
@@ -1031,6 +1043,7 @@ export const SlackConfigSchema = SlackAccountSchema.safeExtend({
   signingSecret: SecretInputSchema.optional().register(sensitive),
   webhookPath: z.string().optional().default("/slack/events"),
   groupPolicy: GroupPolicySchema.optional().default("allowlist"),
+  mentionPatterns: MentionPatternsPolicySchema.optional(),
   contextVisibility: ContextVisibilityModeSchema.optional(),
   accounts: z.record(z.string(), SlackAccountSchema.optional()).optional(),
   defaultAccount: z.string().optional(),

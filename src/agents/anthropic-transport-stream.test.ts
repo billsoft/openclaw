@@ -55,6 +55,25 @@ function createRawSseResponse(body: string): Response {
   });
 }
 
+function createOpenRawSseResponse(params: {
+  body: string;
+  onCancel: (reason: unknown) => void;
+}): Response {
+  const encoder = new TextEncoder();
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(encoder.encode(params.body));
+    },
+    cancel(reason) {
+      params.onCancel(reason);
+    },
+  });
+  return new Response(stream, {
+    status: 200,
+    headers: { "content-type": "text/event-stream" },
+  });
+}
+
 function delay<T>(ms: number, value: T): Promise<T> {
   return new Promise((resolve) => {
     setTimeout(() => resolve(value), ms);
@@ -116,6 +135,7 @@ function makeAnthropicTransportModel(
     baseUrl?: string;
     reasoning?: boolean;
     maxTokens?: number;
+    thinkingLevelMap?: AnthropicMessagesModel["thinkingLevelMap"];
     headers?: Record<string, string>;
     requestTransport?: RequestTransportConfig;
   } = {},
@@ -132,6 +152,7 @@ function makeAnthropicTransportModel(
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
       contextWindow: 200000,
       maxTokens: params.maxTokens ?? 8192,
+      ...(params.thinkingLevelMap ? { thinkingLevelMap: params.thinkingLevelMap } : {}),
       ...(params.headers ? { headers: params.headers } : {}),
     } satisfies AnthropicMessagesModel,
     params.requestTransport ?? {
@@ -403,6 +424,21 @@ describe("anthropic transport stream", () => {
     expect(latestAnthropicRequest().payload.model).toBe("claude-sonnet-4-6");
     expect(latestAnthropicRequest().payload.max_tokens).toBe(8192);
     expect(latestAnthropicRequest().payload.stream).toBe(true);
+  });
+
+  it("forwards stop sequences as Anthropic stop_sequences", async () => {
+    await runTransportStream(
+      makeAnthropicTransportModel(),
+      {
+        messages: [{ role: "user", content: "hello" }],
+      } as AnthropicStreamContext,
+      {
+        apiKey: "sk-ant-api",
+        stop: ["User:", "Assistant:"],
+      } as AnthropicStreamOptions,
+    );
+
+    expect(latestAnthropicRequest().payload.stop_sequences).toEqual(["User:", "Assistant:"]);
   });
 
   it("caps default max_tokens for large-output Anthropic-compatible models", async () => {
@@ -1844,6 +1880,28 @@ describe("anthropic transport stream", () => {
     expect(cancelReason).toBe(abortReason);
   });
 
+  it("cancels open SSE bodies when Anthropic stream consumers throw", async () => {
+    let cancelCalled = false;
+    guardedFetchMock.mockResolvedValueOnce(
+      createOpenRawSseResponse({
+        body: 'data: {"type":"error","error":{"message":"stream exploded"}}\n\n',
+        onCancel: () => {
+          cancelCalled = true;
+        },
+      }),
+    );
+
+    const result = await runTransportStream(
+      makeAnthropicTransportModel(),
+      { messages: [{ role: "user", content: "hello" }] } as AnthropicStreamContext,
+      { apiKey: "sk-ant-api" } as AnthropicStreamOptions,
+    );
+
+    expect(result.stopReason).toBe("error");
+    expect(result.errorMessage).toBe("stream exploded");
+    expect(cancelCalled).toBe(true);
+  });
+
   it("maps adaptive thinking effort for Claude 4.6 transport runs", async () => {
     const model = makeAnthropicTransportModel({
       id: "claude-opus-4-6",
@@ -1867,10 +1925,10 @@ describe("anthropic transport stream", () => {
     expect(payload.output_config).toEqual({ effort: "max" });
   });
 
-  it("maps xhigh thinking effort for Claude Opus 4.7 transport runs", async () => {
+  it("maps xhigh thinking effort for Claude Opus 4.8 transport runs", async () => {
     const model = makeAnthropicTransportModel({
-      id: "claude-opus-4-7",
-      name: "Claude Opus 4.7",
+      id: "claude-opus-4-8",
+      name: "Claude Opus 4.8",
       maxTokens: 8192,
     });
 
@@ -1888,5 +1946,52 @@ describe("anthropic transport stream", () => {
     const payload = latestAnthropicRequest().payload;
     expect(payload.thinking).toEqual({ type: "adaptive" });
     expect(payload.output_config).toEqual({ effort: "xhigh" });
+  });
+
+  it("preserves max thinking effort for Claude Opus 4.8 transport runs", async () => {
+    const model = makeAnthropicTransportModel({
+      id: "claude-opus-4-8",
+      name: "Claude Opus 4.8",
+      maxTokens: 8192,
+      thinkingLevelMap: { xhigh: "xhigh", max: "max" },
+    });
+
+    await runTransportStream(
+      model,
+      {
+        messages: [{ role: "user", content: "Think as much as needed." }],
+      } as AnthropicStreamContext,
+      {
+        apiKey: "sk-ant-api",
+        reasoning: "max",
+      } as AnthropicStreamOptions,
+    );
+
+    const payload = latestAnthropicRequest().payload;
+    expect(payload.thinking).toEqual({ type: "adaptive" });
+    expect(payload.output_config).toEqual({ effort: "max" });
+  });
+
+  it("clamps max thinking effort for Claude models without native max support", async () => {
+    const model = makeAnthropicTransportModel({
+      id: "claude-sonnet-4-6",
+      name: "Claude Sonnet 4.6",
+      maxTokens: 8192,
+    });
+
+    await runTransportStream(
+      model,
+      {
+        messages: [{ role: "user", content: "Think as much as supported." }],
+      } as AnthropicStreamContext,
+      {
+        apiKey: "sk-ant-api",
+        reasoning: "max",
+      } as AnthropicStreamOptions,
+    );
+
+    const payload = latestAnthropicRequest().payload;
+    expect(payload.thinking).toEqual({ type: "adaptive" });
+    expect(payload.output_config).toEqual({ effort: "high" });
   });
 });

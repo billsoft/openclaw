@@ -2,8 +2,9 @@ import {
   LIVE_TRANSPORT_BASELINE_STANDARD_SCENARIO_IDS,
   collectLiveTransportStandardScenarioCoverage,
   findMissingLiveTransportStandardScenarios,
+  type LiveTransportScenarioDefinition,
   type LiveTransportStandardScenarioId,
-} from "openclaw/plugin-sdk/qa-runtime";
+} from "openclaw/plugin-sdk/qa-live-transport-scenarios";
 
 export {
   LIVE_TRANSPORT_BASELINE_STANDARD_SCENARIO_IDS,
@@ -12,7 +13,7 @@ export {
   selectLiveTransportScenarios,
   type LiveTransportScenarioDefinition,
   type LiveTransportStandardScenarioId,
-} from "openclaw/plugin-sdk/qa-runtime";
+} from "openclaw/plugin-sdk/qa-live-transport-scenarios";
 
 export type LiveTransportCoverageMember = {
   scenarioId?: string;
@@ -81,14 +82,13 @@ export function buildLiveTransportCoverageLaneSummaries(
 ): LiveTransportCoverageLaneSummary[] {
   return lanes
     .map((lane) => {
-      const standardScenarioIds = collectLiveTransportStandardScenarioCoverage({
-        scenarios: lane.members.map((member) => ({
-          id: member.scenarioId ?? `${lane.transportId}:${member.standardId}`,
-          standardId: member.standardId,
-          timeoutMs: 0,
-          title: member.standardId,
-        })),
-      });
+      const scenarios: LiveTransportScenarioDefinition[] = lane.members.map((member) => ({
+        id: member.scenarioId ?? `${lane.transportId}:${member.standardId}`,
+        standardId: member.standardId,
+        timeoutMs: 0,
+        title: member.standardId,
+      }));
+      const standardScenarioIds = collectLiveTransportStandardScenarioCoverage({ scenarios });
       return {
         baselineMissingStandardScenarioIds: findMissingLiveTransportStandardScenarios({
           coveredStandardScenarioIds: standardScenarioIds,

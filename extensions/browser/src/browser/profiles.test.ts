@@ -21,10 +21,8 @@ describe("profile name validation", () => {
 
   it("rejects empty or missing names", () => {
     expect(isValidProfileName("")).toBe(false);
-    // @ts-expect-error testing invalid input
-    expect(isValidProfileName(null)).toBe(false);
-    // @ts-expect-error testing invalid input
-    expect(isValidProfileName(undefined)).toBe(false);
+    expect(isValidProfileName(null as unknown as string)).toBe(false);
+    expect(isValidProfileName(undefined as unknown as string)).toBe(false);
   });
 
   it("rejects names that are too long", () => {
@@ -125,6 +123,7 @@ describe("getUsedPorts", () => {
   it("ignores invalid cdpUrl values", () => {
     const profiles = {
       bad: { cdpUrl: "notaurl" },
+      portZero: { cdpUrl: "http://127.0.0.1:0" },
     };
     const used = getUsedPorts(profiles);
     expect(used.size).toBe(0);

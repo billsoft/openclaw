@@ -1,14 +1,10 @@
 import { randomUUID } from "node:crypto";
-import {
-  type ConnectParams,
-  type EventFrame,
-  type HelloOk,
-  MIN_CLIENT_PROTOCOL_VERSION,
-  PROTOCOL_VERSION,
-  type RequestFrame,
-  validateEventFrame,
-  validateRequestFrame,
-  validateResponseFrame,
+import type {
+  ConnectParams,
+  EventFrame,
+  HelloOk,
+  RequestFrame,
+  ResponseFrame,
 } from "@openclaw/gateway-protocol";
 import {
   GATEWAY_CLIENT_MODES,
@@ -25,10 +21,11 @@ import {
   type ConnectErrorRecoveryAdvice,
 } from "@openclaw/gateway-protocol/connect-error-details";
 import { resolveGatewayStartupRetryAfterMs } from "@openclaw/gateway-protocol/startup-unavailable";
+import { MIN_CLIENT_PROTOCOL_VERSION, PROTOCOL_VERSION } from "@openclaw/gateway-protocol/version";
 import ipaddr from "ipaddr.js";
 import { WebSocket, type ClientOptions, type CertMeta } from "ws";
 import { buildDeviceAuthPayloadV3 } from "./device-auth.js";
-import { resolveConnectChallengeTimeoutMs } from "./timeouts.js";
+import { resolveConnectChallengeTimeoutMs, resolveSafeTimeoutDelayMs } from "./timeouts.js";
 
 export type DeviceIdentity = {
   deviceId: string;
@@ -80,12 +77,65 @@ function normalizeOptionalString(value: unknown): string | undefined {
   return trimmed || undefined;
 }
 
-function normalizeLowercaseStringOrEmpty(value: unknown): string {
-  return typeof value === "string" ? value.trim().toLowerCase() : "";
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
-function resolveSafeTimeoutDelayMs(value: number): number {
-  return Math.max(0, Math.min(value, 2_147_483_647));
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0;
+}
+
+function isNonNegativeInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0;
+}
+
+function isGatewayClientErrorShape(value: unknown): boolean {
+  if (!isRecord(value)) {
+    return false;
+  }
+  if (!isNonEmptyString(value.code) || !isNonEmptyString(value.message)) {
+    return false;
+  }
+  if (value.retryable !== undefined && typeof value.retryable !== "boolean") {
+    return false;
+  }
+  if (value.retryAfterMs !== undefined && !isNonNegativeInteger(value.retryAfterMs)) {
+    return false;
+  }
+  return true;
+}
+
+function isGatewayEventFrame(value: unknown): value is EventFrame {
+  if (!isRecord(value) || value.type !== "event" || !isNonEmptyString(value.event)) {
+    return false;
+  }
+  return value.seq === undefined || isNonNegativeInteger(value.seq);
+}
+
+function isGatewayResponseFrame(value: unknown): value is ResponseFrame {
+  if (
+    !isRecord(value) ||
+    value.type !== "res" ||
+    !isNonEmptyString(value.id) ||
+    typeof value.ok !== "boolean"
+  ) {
+    return false;
+  }
+  return value.error === undefined || isGatewayClientErrorShape(value.error);
+}
+
+function validateClientRequestFrame(frame: RequestFrame): string | null {
+  if (!isNonEmptyString(frame.id)) {
+    return "id must be a non-empty string";
+  }
+  if (!isNonEmptyString(frame.method)) {
+    return "method must be a non-empty string";
+  }
+  return null;
+}
+
+function normalizeLowercaseStringOrEmpty(value: unknown): string {
+  return typeof value === "string" ? value.trim().toLowerCase() : "";
 }
 
 function rawDataToString(data: unknown): string {
@@ -516,7 +566,7 @@ export class GatewayClient {
     };
     this.requestTimeoutMs =
       typeof opts.requestTimeoutMs === "number" && Number.isFinite(opts.requestTimeoutMs)
-        ? resolveSafeTimeoutDelayMs(opts.requestTimeoutMs)
+        ? resolveSafeTimeoutDelayMs(opts.requestTimeoutMs, { minMs: 0 })
         : 30_000;
   }
 
@@ -692,9 +742,9 @@ export class GatewayClient {
       return;
     }
     const timeoutMs =
-      typeof opts?.timeoutMs === "number" && Number.isFinite(opts.timeoutMs)
-        ? Math.max(1, Math.floor(opts.timeoutMs))
-        : STOP_AND_WAIT_TIMEOUT_MS;
+      opts?.timeoutMs === undefined
+        ? STOP_AND_WAIT_TIMEOUT_MS
+        : resolveSafeTimeoutDelayMs(opts.timeoutMs);
     let timeout: NodeJS.Timeout | null = null;
     try {
       await Promise.race([
@@ -828,7 +878,7 @@ export class GatewayClient {
         this.startTickWatch();
         this.opts.onHelloOk?.(helloOk);
       })
-      .catch((err) => {
+      .catch((err: unknown) => {
         this.pendingConnectErrorDetailCode =
           err instanceof GatewayClientRequestError ? readConnectErrorDetailCode(err.details) : null;
         this.pendingConnectErrorDetails =
@@ -1237,7 +1287,7 @@ export class GatewayClient {
       this.logDebug(`gateway client parse error: ${formatGatewayClientErrorForLog(err)}`);
       return;
     }
-    if (validateEventFrame(parsed)) {
+    if (isGatewayEventFrame(parsed)) {
       this.lastTick = Date.now();
       const evt = parsed;
       if (evt.event === "connect.challenge") {
@@ -1271,7 +1321,7 @@ export class GatewayClient {
       }
       return;
     }
-    if (validateResponseFrame(parsed)) {
+    if (isGatewayResponseFrame(parsed)) {
       this.lastTick = Date.now();
       const pending = this.pending.get(parsed.id);
       if (!pending) {
@@ -1393,7 +1443,7 @@ export class GatewayClient {
       typeof rawMinInterval === "number" && Number.isFinite(rawMinInterval)
         ? Math.max(1, Math.min(30_000, rawMinInterval))
         : 1000;
-    const interval = Math.max(this.tickIntervalMs, minInterval);
+    const interval = resolveSafeTimeoutDelayMs(Math.max(this.tickIntervalMs, minInterval));
     this.tickTimer = setInterval(() => {
       if (this.closed) {
         return;
@@ -1458,23 +1508,21 @@ export class GatewayClient {
     }
     const id = randomUUID();
     const frame: RequestFrame = { type: "req", id, method, params };
-    if (!validateRequestFrame(frame)) {
-      throw new Error(
-        `invalid request frame: ${JSON.stringify(validateRequestFrame.errors, null, 2)}`,
-      );
+    const requestFrameError = validateClientRequestFrame(frame);
+    if (requestFrameError) {
+      throw new Error(`invalid request frame: ${requestFrameError}`);
     }
     const expectFinal = opts?.expectFinal === true;
     const timeoutMs =
       opts?.timeoutMs === null
         ? null
         : typeof opts?.timeoutMs === "number" && Number.isFinite(opts.timeoutMs)
-          ? resolveSafeTimeoutDelayMs(opts.timeoutMs)
+          ? resolveSafeTimeoutDelayMs(opts.timeoutMs, { minMs: 0 })
           : expectFinal
             ? null
             : this.requestTimeoutMs;
     const signal = opts?.signal;
     const p = new Promise<T>((resolve, reject) => {
-      let abortHandler: (() => void) | undefined;
       const timeout =
         timeoutMs === null
           ? null
@@ -1492,7 +1540,7 @@ export class GatewayClient {
           signal.removeEventListener("abort", abortHandler);
         }
       };
-      abortHandler = () => {
+      const abortHandler: (() => void) | undefined = () => {
         const pending = this.pending.get(id);
         this.pending.delete(id);
         pending?.cleanup?.();

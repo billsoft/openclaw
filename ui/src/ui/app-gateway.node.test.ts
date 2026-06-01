@@ -9,10 +9,12 @@ import type { GatewayHelloOk } from "./gateway.ts";
 const loadChatHistoryMock = vi.hoisted(() => vi.fn(async () => undefined));
 const loadControlUiBootstrapConfigMock = vi.hoisted(() => vi.fn(async () => undefined));
 
+type GatewayRequest = (method: string, payload?: unknown) => Promise<unknown>;
+
 type GatewayClientMock = {
   start: ReturnType<typeof vi.fn>;
   stop: ReturnType<typeof vi.fn>;
-  request: ReturnType<typeof vi.fn>;
+  request: ReturnType<typeof vi.fn<GatewayRequest>>;
   options: { clientVersion?: string };
   emitHello: (hello?: GatewayHelloOk) => void;
   emitClose: (info: {
@@ -43,7 +45,7 @@ vi.mock("./gateway.ts", async (importOriginal) => {
   class GatewayBrowserClient {
     readonly start = vi.fn();
     readonly stop = vi.fn();
-    readonly request = vi.fn(async (method: string) => {
+    readonly request = vi.fn<GatewayRequest>(async (method: string) => {
       if (method === "update.status") {
         return { sentinel: null };
       }
@@ -137,7 +139,6 @@ function createHost(): TestGatewayHost {
       sessionKey: "main",
       lastActiveSessionKey: "main",
       theme: "system",
-      chatFocusMode: false,
       chatShowThinking: true,
       splitRatio: 0.6,
       navCollapsed: false,
@@ -183,13 +184,13 @@ function createHost(): TestGatewayHost {
     toolStreamById: new Map(),
     toolStreamOrder: [],
     toolStreamSyncTimer: null,
-    refreshSessionsAfterChat: new Set<string>(),
+    refreshSessionsAfterChat: new Map(),
     chatSideResultTerminalRuns: new Set<string>(),
     execApprovalQueue: [],
     execApprovalBusy: false,
     execApprovalError: null,
     updateAvailable: null,
-    updateComplete: new Promise(() => undefined),
+    updateComplete: new Promise(() => {}),
   } as unknown as TestGatewayHost;
 }
 
@@ -620,7 +621,7 @@ describe("connectGateway", () => {
     try {
       const { host, client } = connectHostGateway();
       const pendingReload = vi.fn();
-      host.sessionsChangedReloadTimer = globalThis.setTimeout(pendingReload, 1_000);
+      host.sessionsChangedReloadTimer = globalThis.setTimeout(() => pendingReload(), 1_000);
 
       client.emitClose({ code: 1005 });
 
@@ -949,6 +950,25 @@ describe("connectGateway", () => {
     expect(host.pendingAbort).toBeNull();
   });
 
+  it("replays queued selected-global chat aborts with agent scope", async () => {
+    const host = createHost();
+    host.pendingAbort = { sessionKey: "global", agentId: "work" };
+    host.assistantAgentId = "main";
+    host.agentsList = { defaultId: "main", agents: [], mainKey: "main", scope: "global" };
+
+    connectGateway(host);
+    const client = requireGatewayClient();
+
+    client.emitHello();
+    await Promise.resolve();
+
+    expect(client.request).toHaveBeenCalledWith("chat.abort", {
+      sessionKey: "global",
+      agentId: "work",
+    });
+    expect(host.pendingAbort).toBeNull();
+  });
+
   it("retries reconnectable queued chat sends after reconnect hello", async () => {
     const host = createHost();
     host.chatQueue = [
@@ -1151,6 +1171,58 @@ describe("connectGateway", () => {
     expect(sideResult?.question).toBe("what changed?");
     expect(sideResult?.text).toBe("Only the UI layer is missing support.");
     expect(host.chatSideResultTerminalRuns.has("btw-run-1")).toBe(true);
+  });
+
+  it("stores selected-global BTW side results for agent main aliases", () => {
+    const { host, client } = connectHostGateway();
+    host.sessionKey = "agent:work:main";
+    host.agentsList = { defaultId: "main", agents: [], mainKey: "main", scope: "global" };
+
+    client.emitEvent({
+      event: "chat.side_result",
+      payload: {
+        kind: "btw",
+        runId: "btw-work-global",
+        sessionKey: "global",
+        agentId: "work",
+        question: "what changed?",
+        text: "The alias now receives canonical global side results.",
+        ts: 123,
+      },
+    });
+
+    const sideResult = host.chatSideResult as
+      | { agentId?: string; kind?: string; runId?: string; sessionKey?: string; text?: string }
+      | undefined;
+    expect(sideResult?.kind).toBe("btw");
+    expect(sideResult?.runId).toBe("btw-work-global");
+    expect(sideResult?.sessionKey).toBe("global");
+    expect(sideResult?.agentId).toBe("work");
+    expect(sideResult?.text).toBe("The alias now receives canonical global side results.");
+    expect(host.chatSideResultTerminalRuns.has("btw-work-global")).toBe(true);
+  });
+
+  it("ignores selected-global BTW side results from another agent", () => {
+    const { host, client } = connectHostGateway();
+    host.sessionKey = "global";
+    host.assistantAgentId = "work";
+    host.agentsList = { defaultId: "main", agents: [], mainKey: "main", scope: "global" };
+
+    client.emitEvent({
+      event: "chat.side_result",
+      payload: {
+        kind: "btw",
+        runId: "btw-main-global",
+        sessionKey: "global",
+        agentId: "main",
+        question: "what changed?",
+        text: "This belongs to the default agent.",
+        ts: 123,
+      },
+    });
+
+    expect(host.chatSideResult).toBeNull();
+    expect(host.chatSideResultTerminalRuns.has("btw-main-global")).toBe(false);
   });
 
   it("ignores tracked BTW terminal finals without tearing down the active run", () => {
