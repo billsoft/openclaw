@@ -120,4 +120,6 @@ export async function withFileLock<T>(
 export const drainFileLockStateForTest = async (): Promise<void> => {
   await drainFileLockManagerForTest("", FILE_LOCK_MANAGER_KEY);
 };
-export { resetFileLockManagerForTest as resetFileLockStateForTest };
+export const resetFileLockStateForTest = (): void => {
+  resetFileLockManagerForTest("", FILE_LOCK_MANAGER_KEY);
+};
