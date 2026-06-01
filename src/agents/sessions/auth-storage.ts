@@ -150,7 +150,7 @@ export class FileAuthStorageBackend implements AuthStorageBackend {
           randomize: true,
         },
         stale: 30000,
-        onCompromised: (err) => {
+        onCompromised: (err: Error) => {
           lockCompromised = true;
           lockCompromisedError = err;
         },
