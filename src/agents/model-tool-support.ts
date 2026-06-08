@@ -1,3 +1,11 @@
+/**
+ * Model capability helper for tool-use support.
+ *
+ * Provider catalogs can opt a model out via `compat.supportsTools === false`;
+ * absent metadata remains permissive for older catalog entries. The local
+ * enhancement keeps `id`/`provider` on the parameter shape so we can emit
+ * `[openclaw:model-tool-support]` diagnostics for production troubleshooting.
+ */
 let lastSupportsToolsWarning: string | undefined;
 
 export function supportsModelTools(model: {

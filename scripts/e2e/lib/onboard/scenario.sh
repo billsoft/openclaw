@@ -18,7 +18,9 @@ ONBOARD_TMP_ROOT="${ONBOARD_TMP_ROOT%/}"
 mkdir -p "$ONBOARD_TMP_ROOT"
 ONBOARD_TMP_DIR="$(mktemp -d "$ONBOARD_TMP_ROOT/openclaw-onboard.XXXXXX")"
 OPENCLAW_E2E_LOG_DIR="$ONBOARD_TMP_DIR/logs"
+GATEWAY_LOG_PATH="$ONBOARD_TMP_DIR/gateway-e2e.log"
 export OPENCLAW_E2E_LOG_DIR
+export GATEWAY_LOG_PATH
 mkdir -p "$OPENCLAW_E2E_LOG_DIR"
 cleanup_onboard_artifacts() {
   openclaw_e2e_stop_process "${GATEWAY_PID:-}"
@@ -71,23 +73,27 @@ wait_for_log() {
 }
 
 start_gateway() {
-  GATEWAY_PID="$(openclaw_e2e_start_gateway "$OPENCLAW_ENTRY" 18789 /tmp/gateway-e2e.log)"
+  GATEWAY_PID="$(openclaw_e2e_start_gateway "$OPENCLAW_ENTRY" 18789 "$GATEWAY_LOG_PATH")"
 }
 
 wait_for_gateway() {
-  for _ in $(seq 1 20); do
+  local wait_attempts="${OPENCLAW_ONBOARD_GATEWAY_WAIT_ATTEMPTS:-20}"
+  local wait_interval_s="${OPENCLAW_ONBOARD_GATEWAY_WAIT_INTERVAL_S:-1}"
+  local saw_listening_log="false"
+  for _ in $(seq 1 "$wait_attempts"); do
     if openclaw_e2e_probe_tcp 127.0.0.1 18789 500 >/dev/null 2>&1; then
       return 0
     fi
-    if [ -f /tmp/gateway-e2e.log ] && grep -E -q "listening on ws://[^ ]+:18789" /tmp/gateway-e2e.log; then
-      if [ -n "${GATEWAY_PID:-}" ] && kill -0 "$GATEWAY_PID" 2>/dev/null; then
-        return 0
-      fi
+    if [ -f "$GATEWAY_LOG_PATH" ] && grep -E -q "listening on ws://[^ ]+:18789" "$GATEWAY_LOG_PATH"; then
+      saw_listening_log="true"
     fi
-    sleep 1
+    sleep "$wait_interval_s"
   done
   echo "Gateway failed to start"
-  cat /tmp/gateway-e2e.log || true
+  if [ "$saw_listening_log" = "true" ]; then
+    echo "Gateway log reported listening, but TCP probe never succeeded"
+  fi
+  cat "$GATEWAY_LOG_PATH" || true
   return 1
 }
 
