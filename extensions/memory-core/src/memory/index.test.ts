@@ -16,10 +16,7 @@ import { closeAllMemorySearchManagers, getMemorySearchManager } from "./index.js
 import { LOCAL_EMBEDDING_WORKER_ERROR_CODES } from "./manager-local-worker-errors.js";
 import type { MemoryIndexMeta } from "./manager-reindex-state.js";
 import { closeMemoryIndexManagersForAgent, EMBEDDING_PROBE_CACHE_TTL_MS } from "./manager.js";
-import {
-  DEFAULT_LOCAL_MODEL,
-  registerBuiltInMemoryEmbeddingProviders,
-} from "./provider-adapters.js";
+import { registerBuiltInMemoryEmbeddingProviders } from "./provider-adapters.js";
 
 // This suite performs real sqlite/media indexing and can exceed the global
 // timeout when it shares a packed CI extension shard.
@@ -173,20 +170,13 @@ describe("memory embedding provider registration", () => {
     clearRegistry();
   });
 
-  it("registers the builtin local embedding provider", () => {
+  it("does not register a built-in local embedding provider", () => {
     clearRegistry();
     registerBuiltInMemoryEmbeddingProviders({ registerMemoryEmbeddingProvider: registerAdapter });
 
     const adapter = listRegisteredAdapters().find((entry) => entry.id === "local");
 
-    if (!adapter) {
-      throw new Error("expected local embedding provider adapter to be registered");
-    }
-    expect(adapter.id).toBe("local");
-    expect(adapter.defaultModel).toBe(DEFAULT_LOCAL_MODEL);
-    expect(adapter.transport).toBe("local");
-    expect(adapter.authProviderId).toBeUndefined();
-    expect(adapter.autoSelectPriority).toBe(10);
+    expect(adapter).toBeUndefined();
   });
 });
 
@@ -364,6 +354,27 @@ describe("memory index", () => {
     }
   }
 
+  it("does not prepare vector deletes after unsafe reset drops a missing vector table", async () => {
+    const cfg = createCfg({
+      storePath: path.join(workspaceDir, "index-vector-missing-table.sqlite"),
+      vectorEnabled: true,
+      hybrid: { enabled: true, vectorWeight: 0.5, textWeight: 0.5 },
+    });
+    const manager = await getFreshManager(cfg);
+    managersForCleanup.add(manager);
+    type VectorState = { available: boolean | null; dims?: number };
+    const vector = Reflect.get(manager, "vector") as VectorState;
+    vector.available = true;
+    vector.dims = 4;
+    Reflect.set(manager, "vectorReady", Promise.resolve(true));
+
+    await expect(
+      Reflect.apply(Reflect.get(manager, "runUnsafeReindex"), manager, [
+        { reason: "test", force: true },
+      ]),
+    ).resolves.toBeUndefined();
+  });
+
   async function getFtsSessionManager(params: {
     stateDirName: string;
     storeFileName: string;
@@ -528,12 +539,13 @@ describe("memory index", () => {
     }
   });
 
-  it("does not search stale rows when index metadata is missing", async () => {
+  it("rebuilds missing metadata with existing chunks on gateway sync", async () => {
     const dbPath = path.join(workspaceDir, "index-missing-meta-cutover.sqlite");
     const cfg = createCfg({
       storePath: dbPath,
       hybrid: { enabled: true, vectorWeight: 0.5, textWeight: 0.5 },
     });
+    await fs.writeFile(path.join(memoryDir, "2026-01-13.md"), "# Log\nBeta memory line.");
     const oldManager = await getFreshManager(cfg);
     await oldManager.sync({ reason: "test", force: true });
     await oldManager.close?.();
@@ -559,6 +571,19 @@ describe("memory index", () => {
         status: "missing",
         reason: "index metadata is missing",
       });
+
+      vi.stubEnv("OPENCLAW_TEST_MEMORY_UNSAFE_REINDEX", "0");
+      await nextManager.sync({ reason: "test" });
+
+      expect(nextManager.status().dirty).toBe(false);
+      expect(nextManager.status().custom?.indexIdentity).toEqual({ status: "valid" });
+      const repairedAlphaResults = await nextManager.search("alpha");
+      expect(
+        repairedAlphaResults.some((result) => result.path.endsWith("memory/2026-01-12.md")),
+      ).toBe(false);
+      const repairedResults = await nextManager.search("beta");
+      expect(repairedResults.length).toBeGreaterThan(0);
+      expect(repairedResults[0]?.path).toContain("memory/2026-01-13.md");
     } finally {
       await nextManager.close?.();
     }
@@ -585,6 +610,46 @@ describe("memory index", () => {
       expect(nextManager.status().custom?.indexIdentity).toMatchObject({
         status: "mismatched",
       });
+    } finally {
+      await nextManager.close?.();
+    }
+  });
+
+  it("does not rebuild missing semantic metadata when embeddings are unavailable", async () => {
+    const dbPath = path.join(workspaceDir, "index-missing-meta-provider-unavailable.sqlite");
+    const oldCfg = createCfg({
+      storePath: dbPath,
+      model: "semantic-embed",
+      hybrid: { enabled: true, vectorWeight: 0.5, textWeight: 0.5 },
+    });
+    const oldManager = await getFreshManager(oldCfg);
+    await oldManager.sync({ reason: "test", force: true });
+    await oldManager.close?.();
+
+    forceNoProvider = true;
+    const nextManager = await getFreshManager(oldCfg);
+    try {
+      const db = (
+        nextManager as unknown as {
+          db: {
+            exec: (sql: string) => void;
+            prepare: (sql: string) => {
+              get: () => { model?: string } | undefined;
+            };
+          };
+        }
+      ).db;
+      db.exec(`DELETE FROM meta WHERE key = 'memory_index_meta_v1'`);
+
+      await nextManager.sync({ reason: "test" });
+
+      expect(nextManager.status().dirty).toBe(true);
+      expect(nextManager.status().custom?.indexIdentity).toEqual({
+        status: "missing",
+        reason: "index metadata is missing",
+      });
+      const row = db.prepare("SELECT model FROM chunks LIMIT 1").get();
+      expect(row?.model).toBe("semantic-embed");
     } finally {
       await nextManager.close?.();
     }
@@ -1652,7 +1717,7 @@ describe("memory index", () => {
     const manager = await getFreshManager(cfg);
     try {
       await expect(manager.search("Alpha")).rejects.toThrow(
-        /Memory search unavailable: embedding provider "openai" is configured but unavailable\.[\s\S]*agentId=main purpose=default[\s\S]*registeredMemoryEmbeddingProviders=local/,
+        /Memory search unavailable: embedding provider "openai" is configured but unavailable\.[\s\S]*agentId=main purpose=default[\s\S]*registeredMemoryEmbeddingProviders=none/,
       );
       await expect(manager.sync({ reason: "test" })).rejects.toThrow(
         /Memory sync unavailable: embedding provider "openai" is configured but unavailable\./,
