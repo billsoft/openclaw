@@ -75,6 +75,99 @@ describe("cron edit command", () => {
     );
   });
 
+  it("preserves timezone without copying stale stagger when --cron replaces expression (#92291)", async () => {
+    callGatewayFromCli.mockImplementation(async (method: string) => {
+      if (method === "cron.get") {
+        return {
+          id: "job-1",
+          schedule: {
+            kind: "cron",
+            expr: "0 * * * *",
+            tz: "America/Phoenix",
+            staggerMs: 120_000,
+          },
+        };
+      }
+      return { ok: true };
+    });
+    const program = createCronProgram();
+
+    await program.parseAsync(["edit", "job-1", "--cron", "0 5 * * *"], { from: "user" });
+
+    expect(callGatewayFromCli).toHaveBeenCalledWith("cron.get", expect.anything(), { id: "job-1" });
+    expect(callGatewayFromCli).toHaveBeenCalledWith("cron.update", expect.anything(), {
+      id: "job-1",
+      patch: {
+        schedule: {
+          kind: "cron",
+          expr: "0 5 * * *",
+          tz: "America/Phoenix",
+          staggerMs: undefined,
+        },
+      },
+    });
+  });
+
+  it("allows --tz override when --cron replaces expression (#92291)", async () => {
+    const program = createCronProgram();
+
+    await program.parseAsync(
+      ["edit", "job-1", "--cron", "0 5 * * *", "--tz", "UTC", "--stagger", "10s"],
+      { from: "user" },
+    );
+
+    expect(callGatewayFromCli).toHaveBeenCalledWith("cron.update", expect.anything(), {
+      id: "job-1",
+      patch: {
+        schedule: {
+          kind: "cron",
+          expr: "0 5 * * *",
+          tz: "UTC",
+          staggerMs: 10000,
+        },
+      },
+    });
+    expect(callGatewayFromCli).not.toHaveBeenCalledWith("cron.list", expect.anything(), {
+      includeDisabled: true,
+      limit: expect.any(Number),
+      offset: expect.any(Number),
+    });
+  });
+
+  it("preserves timezone when --cron edits stagger metadata (#92291)", async () => {
+    callGatewayFromCli.mockImplementation(async (method: string) => {
+      if (method === "cron.get") {
+        return {
+          id: "job-1",
+          schedule: {
+            kind: "cron",
+            expr: "0 * * * *",
+            tz: "America/Phoenix",
+            staggerMs: 120_000,
+          },
+        };
+      }
+      return { ok: true };
+    });
+    const program = createCronProgram();
+
+    await program.parseAsync(["edit", "job-1", "--cron", "0 5 * * *", "--stagger", "10s"], {
+      from: "user",
+    });
+
+    expect(callGatewayFromCli).toHaveBeenCalledWith("cron.update", expect.anything(), {
+      id: "job-1",
+      patch: {
+        schedule: {
+          kind: "cron",
+          expr: "0 5 * * *",
+          tz: "America/Phoenix",
+          staggerMs: 10000,
+        },
+      },
+    });
+  });
+
   it("preserves command payload kind for timeout-only edits", async () => {
     callGatewayFromCli.mockImplementation(async (method: string) => {
       if (method === "cron.list") {
@@ -106,5 +199,33 @@ describe("cron edit command", () => {
         },
       },
     );
+  });
+
+  it("clears the model override with --clear-model (CLI parity with cron.update model:null)", async () => {
+    const program = createCronProgram();
+
+    await program.parseAsync(["edit", "job-1", "--clear-model"], { from: "user" });
+
+    expect(callGatewayFromCli).toHaveBeenCalledWith(
+      "cron.update",
+      expect.objectContaining({ clearModel: true }),
+      {
+        id: "job-1",
+        patch: {
+          payload: {
+            kind: "agentTurn",
+            model: null,
+          },
+        },
+      },
+    );
+  });
+
+  it("documents the --clear-model flag alongside the sibling --clear-tools", () => {
+    const editCommand = createCronProgram().commands.find((command) => command.name() === "edit");
+    const help = editCommand?.helpInformation() ?? "";
+
+    expect(help).toContain("--clear-model");
+    expect(help).toContain("--clear-tools");
   });
 });

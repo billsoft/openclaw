@@ -7,11 +7,47 @@ function readCiWorkflow() {
   return parse(readFileSync(".github/workflows/ci.yml", "utf8"));
 }
 
+function readWorkflowSanityWorkflow() {
+  return parse(readFileSync(".github/workflows/workflow-sanity.yml", "utf8"));
+}
+
 function readCriticalQualityWorkflow() {
   return readFileSync(".github/workflows/codeql-critical-quality.yml", "utf8");
 }
 
 describe("ci workflow guards", () => {
+  it("runs the session accessor ratchet as a visible additional check", () => {
+    const workflow = readCiWorkflow();
+    const additionalJob = workflow.jobs["check-additional-shard"];
+    const matrixRows = additionalJob.strategy.matrix.include;
+    expect(matrixRows).toContainEqual({
+      check_name: "check-session-accessor-boundary",
+      group: "session-accessor-boundary",
+    });
+
+    const runStep = additionalJob.steps.find((step) => step.name === "Run additional check shard");
+    expect(runStep.run).toContain("session-accessor-boundary)");
+    expect(runStep.run).toContain(
+      'run_check "lint:tmp:session-accessor-boundary" pnpm run lint:tmp:session-accessor-boundary',
+    );
+  });
+
+  it("runs the transcript reader ratchet as a visible additional check", () => {
+    const workflow = readCiWorkflow();
+    const additionalJob = workflow.jobs["check-additional-shard"];
+    const matrixRows = additionalJob.strategy.matrix.include;
+    expect(matrixRows).toContainEqual({
+      check_name: "check-session-transcript-reader-boundary",
+      group: "session-transcript-reader-boundary",
+    });
+
+    const runStep = additionalJob.steps.find((step) => step.name === "Run additional check shard");
+    expect(runStep.run).toContain("session-transcript-reader-boundary)");
+    expect(runStep.run).toContain(
+      'run_check "lint:tmp:session-transcript-reader-boundary" pnpm run lint:tmp:session-transcript-reader-boundary',
+    );
+  });
+
   it("kills timed manual checkout fetches after the grace period", () => {
     const workflowPaths = [
       ".github/workflows/ci.yml",
@@ -72,6 +108,42 @@ describe("ci workflow guards", () => {
         'git -C "$GITHUB_WORKSPACE" fetch --no-tags --depth=1',
       );
     }
+  });
+
+  it("retries workflow sanity checkout fetch timeouts", () => {
+    const workflow = readWorkflowSanityWorkflow();
+
+    for (const jobName of ["no-tabs", "actionlint", "generated-doc-baselines"]) {
+      const checkoutStep = workflow.jobs[jobName].steps.find((step) => step.name === "Checkout");
+
+      expect(checkoutStep.run, jobName).toContain("fetch_checkout_ref()");
+      expect(checkoutStep.run, jobName).toContain("for attempt in 1 2 3");
+      expect(checkoutStep.run, jobName).toContain(
+        'timeout --signal=TERM --kill-after=10s 30s git -C "$GITHUB_WORKSPACE"',
+      );
+      expect(checkoutStep.run, jobName).toContain(
+        'if [ "$fetch_status" != "124" ] && [ "$fetch_status" != "137" ]; then',
+      );
+      expect(checkoutStep.run, jobName).toContain("timed out on attempt $attempt; retrying");
+      expect(checkoutStep.run, jobName).toContain(
+        "fetch --no-tags --prune --no-recurse-submodules --depth=1 origin",
+      );
+    }
+  });
+
+  it("runs plugin SDK API and surface drift checks in workflow sanity", () => {
+    const workflow = readWorkflowSanityWorkflow();
+    const steps = workflow.jobs["generated-doc-baselines"].steps;
+    const stepNames = steps.map((step) => step.name);
+
+    expect(stepNames).toContain("Check plugin SDK API baseline drift");
+    expect(stepNames).toContain("Check plugin SDK surface budget");
+    expect(stepNames.indexOf("Check plugin SDK API baseline drift")).toBeLessThan(
+      stepNames.indexOf("Check plugin SDK surface budget"),
+    );
+    expect(steps.find((step) => step.name === "Check plugin SDK surface budget").run).toBe(
+      "pnpm plugin-sdk:surface:check",
+    );
   });
 
   it("bounds platform checkout fetches without GNU timeout", () => {

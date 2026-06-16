@@ -112,6 +112,13 @@ describe("ensureConfigReady", () => {
     fs.writeFileSync(markerPath, "");
   }
 
+  function writePendingTaskSidecarArchiveMarker(root: string): void {
+    const markerPath = path.join(root, ".openclaw", "tasks", "runs.sqlite");
+    fs.mkdirSync(path.dirname(markerPath), { recursive: true });
+    fs.writeFileSync(`${markerPath}.migrated`, "");
+    fs.writeFileSync(`${markerPath}-wal`, "");
+  }
+
   function writeStateMarker(root: string, relativePath: string): void {
     const markerPath = path.join(root, ".openclaw", relativePath);
     fs.mkdirSync(path.dirname(markerPath), { recursive: true });
@@ -204,6 +211,19 @@ describe("ensureConfigReady", () => {
     });
   });
 
+  it("runs doctor flow when lightweight startup detection finds a pending SQLite archive", async () => {
+    const root = useTempOpenClawHome();
+    writePendingTaskSidecarArchiveMarker(root);
+
+    await runEnsureConfigReady(["status"]);
+
+    expect(loadAndMaybeMigrateDoctorConfigMock).toHaveBeenCalledWith({
+      migrateState: true,
+      migrateLegacyConfig: false,
+      invalidConfigNote: false,
+    });
+  });
+
   it("runs doctor flow for legacy sessions without task sidecars", async () => {
     const root = useTempOpenClawHome();
     fs.mkdirSync(path.join(root, ".openclaw", "sessions"), { recursive: true });
@@ -216,6 +236,22 @@ describe("ensureConfigReady", () => {
   it("runs doctor flow before agent commands when the legacy plugin install index exists", async () => {
     const root = useTempOpenClawHome();
     writeStateMarker(root, "plugins/installs.json");
+
+    await runEnsureConfigReady(["agent"]);
+
+    expect(loadAndMaybeMigrateDoctorConfigMock).toHaveBeenCalledOnce();
+    expect(loadAndMaybeMigrateDoctorConfigMock).toHaveBeenCalledWith({
+      migrateState: true,
+      migrateLegacyConfig: false,
+      invalidConfigNote: false,
+    });
+  });
+
+  it("runs doctor flow before agent commands when default exec approvals must move to a custom state dir", async () => {
+    const root = useTempOpenClawHome();
+    const stateDir = path.join(root, "custom-state");
+    process.env.OPENCLAW_STATE_DIR = stateDir;
+    writeStateMarker(root, "exec-approvals.json");
 
     await runEnsureConfigReady(["agent"]);
 

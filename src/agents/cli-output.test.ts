@@ -5,9 +5,25 @@ import {
   extractCliErrorMessage,
   parseCliJson,
   parseCliJsonl,
+  supportsCliJsonlToolEvents,
   type CliToolUseStartDelta,
 } from "./cli-output.js";
 import { createClaudeApiErrorFixture } from "./test-helpers/claude-api-error-fixture.js";
+
+describe("supportsCliJsonlToolEvents", () => {
+  it.each([
+    ["Claude provider", { command: "claude", output: "jsonl" as const }, "claude-cli", true],
+    [
+      "explicit Claude dialect",
+      { command: "custom", output: "jsonl" as const, jsonlDialect: "claude-stream-json" as const },
+      "custom-cli",
+      true,
+    ],
+    ["generic JSONL", { command: "custom", output: "jsonl" as const }, "custom-cli", false],
+  ])("%s: %s", (_name, backend, providerId, expected) => {
+    expect(supportsCliJsonlToolEvents({ backend, providerId })).toBe(expected);
+  });
+});
 
 describe("parseCliJson", () => {
   it("recovers mixed-output Claude session metadata from embedded JSON objects", () => {
@@ -905,7 +921,6 @@ describe("createCliJsonlStreamingParser", () => {
         sessionIdFields: ["session_id"],
       },
       providerId: "claude-cli",
-      classifyCommentaryText: true,
       onAssistantDelta: (delta) => deltas.push({ text: delta.text, delta: delta.delta }),
       onCommentaryText: (text) => commentaryTexts.push(text),
     });
@@ -954,7 +969,6 @@ describe("createCliJsonlStreamingParser", () => {
         sessionIdFields: ["session_id"],
       },
       providerId: "claude-cli",
-      classifyCommentaryText: true,
       onAssistantDelta: (delta) => deltas.push({ text: delta.text, delta: delta.delta }),
       onCommentaryText: (text) => commentaryTexts.push(text),
     });
@@ -990,7 +1004,7 @@ describe("createCliJsonlStreamingParser", () => {
     expect(deltas).toEqual([{ text: "Final answer.", delta: "Final answer." }]);
   });
 
-  it("drops Claude commentary text when classification is enabled without delivery", () => {
+  it("keeps pre-tool text in assistant deltas when no commentary consumer is wired", () => {
     const deltas: Array<{ text: string; delta: string }> = [];
     const parser = createCliJsonlStreamingParser({
       backend: {
@@ -1000,7 +1014,6 @@ describe("createCliJsonlStreamingParser", () => {
         sessionIdFields: ["session_id"],
       },
       providerId: "claude-cli",
-      classifyCommentaryText: true,
       onAssistantDelta: (delta) => deltas.push({ text: delta.text, delta: delta.delta }),
     });
 
@@ -1026,7 +1039,9 @@ describe("createCliJsonlStreamingParser", () => {
     );
     parser.finish();
 
-    expect(deltas).toEqual([]);
+    expect(deltas).toEqual([
+      { text: "Let me inspect the repo.", delta: "Let me inspect the repo." },
+    ]);
   });
 
   it("does not fire onCommentaryText when no text precedes tool_use", () => {
@@ -1039,7 +1054,6 @@ describe("createCliJsonlStreamingParser", () => {
         sessionIdFields: ["session_id"],
       },
       providerId: "claude-cli",
-      classifyCommentaryText: true,
       onAssistantDelta: () => undefined,
       onCommentaryText: (text) => commentaryTexts.push(text),
     });
@@ -1072,7 +1086,6 @@ describe("createCliJsonlStreamingParser", () => {
         sessionIdFields: ["session_id"],
       },
       providerId: "claude-cli",
-      classifyCommentaryText: true,
       onAssistantDelta: () => undefined,
       onCommentaryText: (text) => commentaryTexts.push(text),
     });
@@ -1120,7 +1133,6 @@ describe("createCliJsonlStreamingParser", () => {
         sessionIdFields: ["session_id"],
       },
       providerId: "claude-cli",
-      classifyCommentaryText: true,
       onAssistantDelta: () => undefined,
       onCommentaryText: (text) => commentaryTexts.push(text),
     });
