@@ -3133,7 +3133,11 @@ export async function runEmbeddedAttempt(
         trigger: params.trigger,
         runTimeoutMs: resolvedRunTimeoutMs,
         modelRequestTimeoutMs: (params.model as { requestTimeoutMs?: number }).requestTimeoutMs,
-        model: params.model as { baseUrl?: string },
+        model: {
+          baseUrl: params.model.baseUrl,
+          id: params.modelId,
+          provider: params.provider,
+        },
       });
       if (idleTimeoutMs > 0) {
         activeSession.agent.streamFn = streamWithIdleTimeout(
@@ -5109,6 +5113,12 @@ export async function runEmbeddedAttempt(
             } catch (entryErr) {
               log.warn(`failed to persist prompt error entry: ${String(entryErr)}`);
             }
+          }
+
+          if (activeContextEngine && !beforeAgentFinalizeRevisionReason) {
+            // Context-engine afterTurn hooks may reconcile against the jsonl, so
+            // materialize the active turn before finalization reads from disk.
+            flushSessionManagerFile(activeSessionManager);
           }
         });
 
