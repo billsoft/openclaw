@@ -212,9 +212,16 @@ function createRichEntityInvalidError(entity = "EMAIL", operation = "sendRichMes
   );
 }
 
-function createWrappedPreConnectHttpError(operation = "sendMessage") {
-  const root = Object.assign(new Error("getaddrinfo ENOTFOUND api.telegram.org"), {
-    code: "ENOTFOUND",
+function createHtmlParseError(operation = "sendMessage") {
+  return new Error(
+    `GrammyError: Call to '${operation}' failed! (400: Bad Request: can't parse entities: Can't find end of the entity)`,
+  );
+}
+
+function createWrappedConnectTimeoutHttpError(operation = "sendMessage") {
+  const root = Object.assign(new Error("Connect Timeout Error"), {
+    name: "ConnectTimeoutError",
+    code: "UND_ERR_CONNECT_TIMEOUT",
   });
   const fetchError = Object.assign(new TypeError("fetch failed"), { cause: root });
   return Object.assign(new Error(`Network request for '${operation}' failed!`), {
@@ -810,6 +817,36 @@ describe("deliverReplies", () => {
     });
   });
 
+  it("falls back to a plain media caption when Telegram rejects caption HTML", async () => {
+    const runtime = createRuntime();
+    const sendPhoto = vi
+      .fn()
+      .mockRejectedValueOnce(createHtmlParseError("sendPhoto"))
+      .mockResolvedValueOnce({
+        message_id: 3,
+        chat: { id: "123" },
+      });
+    const bot = createBot({ sendPhoto });
+
+    mockMediaLoad("photo.jpg", "image/jpeg", "image");
+
+    await deliverWith({
+      replies: [{ mediaUrl: "https://example.com/photo.jpg", text: "hi **boss**" }],
+      runtime,
+      bot,
+    });
+
+    expect(sendPhoto).toHaveBeenCalledTimes(2);
+    expectRecordFields(mockCallArg(sendPhoto, 0, 2), {
+      caption: "hi <b>boss</b>",
+      parse_mode: "HTML",
+    });
+    expectRecordFields(mockCallArg(sendPhoto, 1, 2), {
+      caption: "hi **boss**",
+    });
+    expect(mockCallArg(sendPhoto, 1, 2)).not.toHaveProperty("parse_mode");
+  });
+
   it("passes probed dimensions to video reply sends", async () => {
     const runtime = createRuntime();
     const sendVideo = vi.fn().mockResolvedValue({
@@ -991,12 +1028,12 @@ describe("deliverReplies", () => {
     expect(runtime.error).toHaveBeenCalledTimes(1);
   });
 
-  it("retries final text sends for wrapped pre-connect grammY HttpError envelopes", async () => {
+  it("retries final text sends for wrapped Undici connect timeouts", async () => {
     vi.useFakeTimers();
     const runtime = createRuntime();
     const sendMessage = vi
       .fn()
-      .mockRejectedValueOnce(createWrappedPreConnectHttpError("sendMessage"))
+      .mockRejectedValueOnce(createWrappedConnectTimeoutHttpError("sendMessage"))
       .mockResolvedValueOnce({
         message_id: 12,
         chat: { id: "123" },
@@ -1295,6 +1332,32 @@ describe("deliverReplies", () => {
     expect(firstMockCallArg(sendMessage, 0)).toBe("123");
     expect(firstMockCallArg(sendMessage, 1)).toBe(text);
     expect(mockCallArg(sendMessage, 0, 2)).not.toHaveProperty("parse_mode");
+  });
+
+  it("uses table-aware plain text when rich reply fallback sends", async () => {
+    const runtime = createRuntime();
+    const sendMessage = vi.fn().mockResolvedValue({
+      message_id: 12,
+      chat: { id: "123" },
+    });
+    const bot = createBot({ sendMessage });
+    (bot.api.raw as unknown as { sendRichMessage: ReturnType<typeof vi.fn> }).sendRichMessage = vi
+      .fn()
+      .mockRejectedValue(createRichEntityInvalidError("URL"));
+    const text = "| Rank | Model | Score |\n| --- | --- | --- |\n| 4 | Claude Opus | 78.16% |";
+
+    await deliverWith({
+      replies: [{ text }],
+      runtime,
+      bot,
+      richMessages: true,
+    });
+
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+    expect(firstMockCallArg(sendMessage, 1)).toBe("Rank | Model | Score\n4 | Claude Opus | 78.16%");
+    expect(runtime.log).toHaveBeenCalledWith(
+      expect.stringContaining("rich-degrade=plain-fallback:rich-entity-invalid"),
+    );
   });
 
   it("falls back to plain text for other invalid rich entity validation errors", async () => {
