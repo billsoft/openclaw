@@ -377,6 +377,9 @@ describe("createPdfTool", () => {
 
       const [, loadOptions] = firstMockCall(loadSpy, "loadWebMediaRaw");
       expectFields(loadOptions, { maxBytes: 524_288 });
+      expect(modelAuth.getApiKeyForModel).toHaveBeenCalledWith(
+        expect.objectContaining({ secretSentinels: true }),
+      );
     });
   });
 
@@ -571,6 +574,7 @@ describe("createPdfTool", () => {
       expect(modelsAgentDir).toBe(agentDir);
       expect(modelsOptions).toEqual({ workspaceDir });
       expect(modelDiscovery.discoverModels).toHaveBeenCalledWith(expect.anything(), agentDir, {
+        config: modelsConfigArg,
         workspaceDir,
       });
       expect(extractSpy).not.toHaveBeenCalled();

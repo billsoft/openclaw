@@ -153,6 +153,7 @@ describe("session accessor boundary guard", () => {
         "src/config/sessions/cleanup-service.ts",
         "src/config/sessions/goals.ts",
         "src/gateway/boot.ts",
+        "src/gateway/server-methods/chat.ts",
         "src/gateway/server-methods/sessions.ts",
         "src/gateway/server-node-events.ts",
         "src/gateway/session-compaction-checkpoints.ts",
@@ -205,17 +206,7 @@ describe("session accessor boundary guard", () => {
   });
 
   it("ratchets only explicit file-backed SDK session compatibility exports", () => {
-    expect(allowedSessionStoreRuntimeFileBackedCompatExports).toEqual(
-      new Set([
-        "loadSessionStore",
-        "readLatestAssistantTextFromSessionTranscript",
-        "resolveAndPersistSessionFile",
-        "resolveSessionFilePath",
-        "resolveSessionStoreEntry",
-        "saveSessionStore",
-        "updateSessionStore",
-      ]),
-    );
+    expect(allowedSessionStoreRuntimeFileBackedCompatExports).toEqual(new Set([]));
   });
 
   it("collects file-backed SDK session compatibility exports", () => {
@@ -412,7 +403,7 @@ describe("session accessor boundary guard", () => {
   it("flags legacy transcript writer imports", () => {
     expect(
       findTranscriptWriterBoundaryViolations(`
-        import { appendSessionTranscriptMessage } from "../config/sessions/transcript-append.js";
+        import { appendSessionTranscriptMessage } from "../config/sessions/transcript-append.test-support.js";
         import { emitSessionTranscriptUpdate as emitUpdate } from "../sessions/transcript-events.js";
       `),
     ).toEqual([

@@ -5,6 +5,7 @@ import {
   MAX_DATE_TIMESTAMP_MS,
   resolveExpiresAtMsFromDurationMs,
 } from "openclaw/plugin-sdk/number-runtime";
+import { truncateUtf16Safe } from "openclaw/plugin-sdk/text-utility-runtime";
 import type {
   PersistedWorkboardAttachment,
   PersistedWorkboardBoard,
@@ -2039,7 +2040,7 @@ function capText(value: string | undefined, max: number): string | undefined {
   if (!value) {
     return undefined;
   }
-  return value.length <= max ? value : `${value.slice(0, Math.max(0, max - 1))}…`;
+  return value.length <= max ? value : `${truncateUtf16Safe(value, Math.max(0, max - 1))}…`;
 }
 
 function cardBoardId(card: WorkboardCard): string {
@@ -2560,12 +2561,6 @@ export class WorkboardStore {
       automation,
     );
     const normalizedPosition = normalizePosition(input.position, Number.NaN);
-    const position = Number.isFinite(normalizedPosition)
-      ? normalizedPosition
-      : Math.max(
-          0,
-          ...cards.filter((card) => card.status === status).map((card) => card.position),
-        ) + POSITION_STEP;
     const notes = normalizeNotes(input.notes);
     const agentId = normalizeOptionalString(input.agentId);
     const sessionKey = normalizeOptionalString(input.sessionKey);
@@ -2600,6 +2595,15 @@ export class WorkboardStore {
     const syncedMetadata = trimMetadataToBudget(
       syncExecutionAttemptMetadata(metadata, execution, now),
     );
+    const boardId = syncedMetadata.automation?.boardId ?? "default";
+    const position = Number.isFinite(normalizedPosition)
+      ? normalizedPosition
+      : Math.max(
+          0,
+          ...cards
+            .filter((card) => card.status === status && cardBoardId(card) === boardId)
+            .map((card) => card.position),
+        ) + POSITION_STEP;
     let card: WorkboardCard = {
       id: randomUUID(),
       title: normalizeTitle(input.title),
@@ -3400,7 +3404,12 @@ export class WorkboardStore {
         ttlSeconds ? secondsToDurationMs(ttlSeconds) : DEFAULT_CLAIM_TTL_MS,
       );
       const guarded = await this.promoteDependencyReady(id, now);
-      if (cardParentIds(guarded).length > 0 && guarded.status !== "ready") {
+      const existingClaim = guarded.metadata?.claim;
+      const activeClaim =
+        existingClaim && isFutureDateTimestampMs(existingClaim.expiresAt, { nowMs: now })
+          ? existingClaim
+          : undefined;
+      if (cardParentIds(guarded).length > 0 && guarded.status !== "ready" && !activeClaim) {
         throw new Error("card dependencies are not done.");
       }
       if (guarded.status === "scheduled") {
@@ -3409,9 +3418,8 @@ export class WorkboardStore {
       if (retryBudgetExhausted(guarded)) {
         throw new Error("card exhausted its retry budget.");
       }
-      const existingClaim = guarded.metadata?.claim;
-      if (existingClaim && isFutureDateTimestampMs(existingClaim.expiresAt, { nowMs: now })) {
-        throw new Error(`card already claimed by ${existingClaim.ownerId}.`);
+      if (activeClaim) {
+        throw new Error(`card already claimed by ${activeClaim.ownerId}.`);
       }
       const metadata = clearDiagnostics(guarded.metadata, ["stranded_ready"]);
       const card = await this.updateCard(id, {

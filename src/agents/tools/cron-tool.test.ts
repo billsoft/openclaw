@@ -685,6 +685,20 @@ describe("cron tool", () => {
     );
   });
 
+  it("documents the event-trigger authoring contract", () => {
+    const tool = createTestCronTool();
+
+    expect(tool.description).toContain("Gate: cron.triggers.enabled");
+    expect(tool.description).toContain("quiet check uses no model");
+    expect(tool.description).toContain("trigger.state");
+    expect(tool.description).toContain("fire:false: save state; no payload/run history");
+    expect(tool.description).toContain("Fired state saves only after payload success");
+    expect(tool.description).toContain('Silent watcher: top-level delivery.mode="none"');
+    expect(tool.description).toContain("missing route may fail payload");
+    expect(tool.description).toContain("once:true: disable after first successful fired payload");
+    expect(tool.description).toContain('await tools.call("exec"');
+  });
+
   it("documents due-by-default cron run mode", () => {
     const tool = createTestCronTool();
     const parameters = tool.parameters as SchemaLike;
@@ -1046,7 +1060,10 @@ describe("cron tool", () => {
     expect(params?.failureAlert).toBe(false);
   });
 
-  it("rejects command payloads from the agent cron tool on add", async () => {
+  it.each([
+    ["canonical", "command"],
+    ["mixed-case", "Command"],
+  ])("rejects %s command payloads from the agent cron tool on add", async (_case, kind) => {
     const tool = createTestCronTool();
 
     await expect(
@@ -1056,7 +1073,7 @@ describe("cron tool", () => {
           name: "command",
           schedule: { at: new Date(123).toISOString() },
           sessionTarget: "isolated",
-          payload: { kind: "command", argv: ["sh", "-lc", "echo ok"] },
+          payload: { kind, argv: ["sh", "-lc", "echo ok"] },
         },
       }),
     ).rejects.toThrow("cron command payloads cannot be created or edited");
@@ -2073,7 +2090,10 @@ describe("cron tool", () => {
     expect(params?.patch?.failureAlert).toBe(false);
   });
 
-  it("rejects command payloads from the agent cron tool on update", async () => {
+  it.each([
+    ["canonical", "command"],
+    ["mixed-case", "Command"],
+  ])("rejects %s command payloads from the agent cron tool on update", async (_case, kind) => {
     const tool = createTestCronTool();
 
     await expect(
@@ -2081,7 +2101,7 @@ describe("cron tool", () => {
         action: "update",
         id: "job-4",
         patch: {
-          payload: { kind: "command", argv: ["sh", "-lc", "echo ok"] },
+          payload: { kind, argv: ["sh", "-lc", "echo ok"] },
         },
       }),
     ).rejects.toThrow("cron command payloads cannot be created or edited");

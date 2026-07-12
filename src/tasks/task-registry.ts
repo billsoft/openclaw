@@ -14,6 +14,10 @@ import { formatErrorMessage } from "../infra/errors.js";
 import { requestHeartbeat } from "../infra/heartbeat-wake.js";
 import { enqueueSystemEvent } from "../infra/system-events.js";
 import { createSubsystemLogger } from "../logging/subsystem.js";
+import {
+  isGatewayRestartDraining,
+  runWithGatewayIndependentRootWorkAdmission,
+} from "../process/gateway-work-admission.js";
 import { normalizeAgentId, parseAgentSessionKey } from "../routing/session-key.js";
 import { createLazyPromiseLoader } from "../shared/lazy-runtime.js";
 import { normalizeDeliveryContext } from "../utils/delivery-context.shared.js";
@@ -73,7 +77,12 @@ const taskIdsByRelatedSessionKey = taskRegistryProcessState.taskIdsByRelatedSess
 const tasksWithPendingDelivery = taskRegistryProcessState.tasksWithPendingDelivery;
 let listenerStarted = false;
 let listenerStop: (() => void) | null = null;
-let restoreAttempted = false;
+type TaskRegistryRestoreState =
+  | { status: "uninitialized" }
+  | { status: "restoring" }
+  | { status: "ready" }
+  | { status: "failed"; error: Error };
+let taskRegistryRestoreState: TaskRegistryRestoreState = { status: "uninitialized" };
 const taskFlowSyncRetryTimers = new Map<string, ReturnType<typeof setTimeout>>();
 type TaskRegistryDeliveryRuntime = Pick<
   typeof import("./task-registry-delivery-runtime.js"),
@@ -126,7 +135,7 @@ export type ParentFlowLinkErrorCode =
   | "cancel_requested"
   | "terminal";
 
-export class ParentFlowLinkError extends Error {
+class ParentFlowLinkError extends Error {
   constructor(
     public readonly code: ParentFlowLinkErrorCode,
     message: string,
@@ -1147,24 +1156,36 @@ function scheduleTaskFlowSyncRetry(task: TaskRecord, operation: string, attempt 
   }
   const retryTimer = setTimeout(() => {
     taskFlowSyncRetryTimers.delete(taskId);
-    const current = tasks.get(taskId);
-    if (!current) {
-      return;
-    }
-    const flowId = current.parentFlowId?.trim();
-    if (!flowId || findLatestTaskForFlowId(flowId)?.taskId !== taskId) {
-      return;
-    }
-    const result = syncFlowFromTaskResult(current);
-    if (!result.ok) {
-      log.warn("Failed to retry parent flow sync from task", {
+    // A terminal task no longer blocks suspension, but its durable parent-flow
+    // projection still mutates state. Keep every delayed attempt visible and
+    // prevent it from crossing a prepared host snapshot boundary.
+    void runWithGatewayIndependentRootWorkAdmission(async () => {
+      const current = tasks.get(taskId);
+      if (!current) {
+        return;
+      }
+      const flowId = current.parentFlowId?.trim();
+      if (!flowId || findLatestTaskForFlowId(flowId)?.taskId !== taskId) {
+        return;
+      }
+      const result = syncFlowFromTaskResult(current);
+      if (!result.ok) {
+        log.warn("Failed to retry parent flow sync from task", {
+          operation,
+          taskId,
+          flowId: current.parentFlowId,
+          reason: result.reason,
+        });
+        scheduleTaskFlowSyncRetry(current, operation, attempt + 1);
+      }
+    }).catch((error: unknown) => {
+      log.warn("Failed to admit parent flow sync retry from task", {
         operation,
         taskId,
-        flowId: current.parentFlowId,
-        reason: result.reason,
+        flowId: task.parentFlowId,
+        error,
       });
-      scheduleTaskFlowSyncRetry(current, operation, attempt + 1);
-    }
+    });
   }, delayMs);
   retryTimer.unref?.();
   taskFlowSyncRetryTimers.set(taskId, retryTimer);
@@ -1192,31 +1213,54 @@ function clearTaskFlowSyncRetries(): void {
 }
 
 function restoreTaskRegistryOnce() {
-  if (restoreAttempted) {
-    return;
+  switch (taskRegistryRestoreState.status) {
+    case "ready":
+      return;
+    case "failed":
+      throw taskRegistryRestoreState.error;
+    case "restoring":
+      throw new Error("Task registry restore is already in progress.");
+    case "uninitialized":
+      break;
   }
-  restoreAttempted = true;
+  taskRegistryRestoreState = { status: "restoring" };
   try {
     const restored = getTaskRegistryStore().loadSnapshot();
-    if (restored.tasks.size === 0 && restored.deliveryStates.size === 0) {
-      return;
-    }
+    const restoredTasks = new Map<string, TaskRecord>();
     for (const [taskId, task] of restored.tasks.entries()) {
-      tasks.set(taskId, normalizeTaskTimestamps(task));
+      restoredTasks.set(taskId, normalizeTaskTimestamps(task));
     }
-    for (const [taskId, state] of restored.deliveryStates.entries()) {
+    const restoredDeliveryStates = new Map(restored.deliveryStates);
+
+    clearTaskRegistryMemory();
+    for (const [taskId, task] of restoredTasks.entries()) {
+      tasks.set(taskId, task);
+    }
+    for (const [taskId, state] of restoredDeliveryStates.entries()) {
       taskDeliveryStates.set(taskId, state);
     }
     rebuildRunIdIndex();
     rebuildOwnerKeyIndex();
     rebuildParentFlowIdIndex();
     rebuildRelatedSessionKeyIndex();
-    emitTaskRegistryObserverEvent(() => ({
-      kind: "restored",
-      tasks: snapshotTaskRecords(tasks),
-    }));
+    taskRegistryRestoreState = { status: "ready" };
+    if (restoredTasks.size > 0 || restoredDeliveryStates.size > 0) {
+      emitTaskRegistryObserverEvent(() => ({
+        kind: "restored",
+        tasks: snapshotTaskRecords(tasks),
+      }));
+    }
   } catch (error) {
-    log.warn("Failed to restore task registry", { error });
+    clearTaskRegistryMemory();
+    const message = formatErrorMessage(error);
+    const restoreError = new Error(`Task registry restore failed: ${message}`, { cause: error });
+    taskRegistryRestoreState = { status: "failed", error: restoreError };
+    // Compact console logs omit structured metadata, so keep the rejected value visible there too.
+    log.warn("Failed to restore task registry", {
+      error: message,
+      consoleMessage: `Failed to restore task registry: ${message}`,
+    });
+    throw restoreError;
   }
 }
 
@@ -1227,8 +1271,8 @@ export function ensureTaskRegistryReady() {
 
 export function reloadTaskRegistryFromStore(): void {
   clearTaskRegistryMemory();
-  restoreAttempted = false;
-  restoreTaskRegistryOnce();
+  taskRegistryRestoreState = { status: "uninitialized" };
+  ensureTaskRegistryReady();
 }
 
 function updateTask(taskId: string, patch: Partial<TaskRecord>): TaskRecord | null {
@@ -1398,6 +1442,38 @@ function queueBlockedTaskFollowup(task: TaskRecord) {
 }
 
 export async function maybeDeliverTaskTerminalUpdate(taskId: string): Promise<TaskRecord | null> {
+  return await runTaskDeliveryWithIndependentAdmission(taskId, async () =>
+    maybeDeliverTaskTerminalUpdateUnderAdmission(taskId),
+  );
+}
+
+async function runTaskDeliveryWithIndependentAdmission(
+  taskId: string,
+  deliver: () => Promise<TaskRecord | null>,
+): Promise<TaskRecord | null> {
+  ensureTaskRegistryReady();
+  let admitted = false;
+  try {
+    return await runWithGatewayIndependentRootWorkAdmission(async () => {
+      admitted = true;
+      return await deliver();
+    });
+  } catch (error) {
+    // Late lifecycle callbacks must not leak a rejected detached promise after
+    // restart closes admission. An already-admitted delivery still reports its
+    // own failures instead of hiding them behind a concurrent restart.
+    if (!admitted && isGatewayRestartDraining()) {
+      ensureTaskRegistryReady();
+      const current = tasks.get(taskId);
+      return current ? cloneTaskRecord(current) : null;
+    }
+    throw error;
+  }
+}
+
+async function maybeDeliverTaskTerminalUpdateUnderAdmission(
+  taskId: string,
+): Promise<TaskRecord | null> {
   ensureTaskRegistryReady();
   const current = tasks.get(taskId);
   if (!current || !shouldAutoDeliverTaskTerminalUpdate(current)) {
@@ -1546,6 +1622,15 @@ export async function maybeDeliverTaskTerminalUpdate(taskId: string): Promise<Ta
 }
 
 export async function maybeDeliverTaskStateChangeUpdate(
+  taskId: string,
+  latestEvent?: TaskEventRecord,
+): Promise<TaskRecord | null> {
+  return await runTaskDeliveryWithIndependentAdmission(taskId, async () =>
+    maybeDeliverTaskStateChangeUpdateUnderAdmission(taskId, latestEvent),
+  );
+}
+
+async function maybeDeliverTaskStateChangeUpdateUnderAdmission(
   taskId: string,
   latestEvent?: TaskEventRecord,
 ): Promise<TaskRecord | null> {
@@ -1767,6 +1852,14 @@ function ensureListener() {
         }
       } else if (evt.stream === "error") {
         patch.error = typeof evt.data?.error === "string" ? evt.data.error : current.error;
+      } else if (evt.stream === "tool" && evt.data?.phase === "start") {
+        // Tool starts are the activity signal surfaced in task summaries; ends
+        // and outputs only refresh lastEventAt.
+        const toolName = typeof evt.data.name === "string" ? evt.data.name.trim() : "";
+        if (toolName) {
+          patch.toolUseCount = (current.toolUseCount ?? 0) + 1;
+          patch.lastToolName = toolName;
+        }
       }
       const stateChangeEvent =
         patch.status && patch.status !== current.status
@@ -2407,6 +2500,13 @@ export async function cancelTaskById(params: {
   }
 }
 
+// Callers that provide their own order use this cloned snapshot to avoid paying
+// for listTaskRecords' createdAt sort before immediately discarding that order.
+export function listTaskRecordsUnsorted(): TaskRecord[] {
+  ensureTaskRegistryReady();
+  return snapshotTaskRecords(tasks);
+}
+
 export function listTaskRecords(): TaskRecord[] {
   ensureTaskRegistryReady();
   return [...tasks.values()]
@@ -2600,7 +2700,7 @@ export function deleteTaskRecordById(taskId: string): boolean {
 
 export function resetTaskRegistryForTests(opts?: { persist?: boolean }) {
   clearTaskRegistryMemory();
-  restoreAttempted = false;
+  taskRegistryRestoreState = { status: "uninitialized" };
   resetTaskRegistryRuntimeForTests();
   if (listenerStop) {
     listenerStop();

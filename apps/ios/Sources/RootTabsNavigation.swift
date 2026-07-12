@@ -171,6 +171,13 @@ extension RootTabs {
         !isSidebarVisible
     }
 
+    static func visibleSettingsRoute(
+        navigationPath: [SettingsRoute],
+        baseRoute: SettingsRoute?) -> SettingsRoute?
+    {
+        navigationPath.last ?? baseRoute
+    }
+
     static func shouldShowSidebarRevealInDestinationHeader(
         isSidebarVisible: Bool,
         layoutMode: SidebarLayoutMode) -> Bool
@@ -243,13 +250,15 @@ extension RootTabs {
         if gatewayConnected {
             return .none
         }
+        // Saved gateway state survives independently of the onboarding markers.
+        // Explicit resets bypass this route through evaluateOnboardingPresentation(force:).
+        if hasExistingGatewayConfig {
+            return .none
+        }
         if shouldPresentOnLaunch || !hasConnectedOnce || !onboardingComplete {
             return .onboarding
         }
-        if !hasExistingGatewayConfig {
-            return .settings
-        }
-        return .none
+        return .settings
     }
 
     static func shouldPresentQuickSetup(

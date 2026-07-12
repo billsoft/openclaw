@@ -170,6 +170,17 @@ function createCronPayloadSchema(): TSchema {
   );
 }
 
+function createCronTriggerSchema(params: { nullableClears: boolean }): TSchema {
+  const trigger = Type.Object(
+    {
+      script: Type.String({ minLength: 1, maxLength: 65_536 }),
+      once: Type.Optional(Type.Boolean()),
+    },
+    { additionalProperties: false },
+  );
+  return Type.Optional(params.nullableClears ? Type.Union([trigger, Type.Null()]) : trigger);
+}
+
 function cronDeliverySchema(params: { nullableClears: boolean }) {
   const failureDestinationObject = Type.Object(
     {
@@ -281,6 +292,7 @@ function createCronJobObjectSchema(): TSchema {
           ),
         ),
         schedule: createCronScheduleSchema(),
+        trigger: createCronTriggerSchema({ nullableClears: false }),
         sessionTarget: Type.Optional(
           Type.String({
             description: "main | isolated | current | session:<id>",
@@ -312,6 +324,7 @@ function createCronPatchObjectSchema(): TSchema {
           }),
         ),
         schedule: createCronScheduleSchema(),
+        trigger: createCronTriggerSchema({ nullableClears: true }),
         sessionTarget: Type.Optional(Type.String({ description: "Session target" })),
         wakeMode: optionalStringEnum(CRON_WAKE_MODES),
         payload: Type.Optional(
@@ -444,7 +457,7 @@ function assertNoCronShellExecution(value: unknown): void {
     return;
   }
   const payload = isRecord(value.payload) ? value.payload : undefined;
-  if (payload?.kind === "command") {
+  if (normalizeLowercaseStringOrEmpty(payload?.kind) === "command") {
     throw new Error(
       "cron command payloads cannot be created or edited through the agent cron tool; use the CLI or Gateway API.",
     );
@@ -901,6 +914,7 @@ JOB SCHEMA (for add action):
 {
   "name": "string",
   "schedule": { ... },      // required
+  "trigger": { "script": "...", "once": false }, // optional condition gate for every/cron
   "payload": { ... },       // required
   "delivery": { ... },      // optional announce for isolated/current/session, webhook for any target
   "sessionTarget": "main" | "isolated" | "current" | "session:<id>",
@@ -928,6 +942,14 @@ SCHEDULE TYPES (schedule.kind):
   Write expr in local wall-clock time; do not convert the requested local time to UTC first.
   tz omitted => Gateway host local timezone, not UTC.
   Example 6pm Shanghai daily: { "kind": "cron", "expr": "0 18 * * *", "tz": "Asia/Shanghai" }
+
+TRIGGER SCRIPTS (every/cron only):
+- Gate: cron.triggers.enabled. Disabled add -> explain; no model-poll fallback.
+- Headless; owner tool allowlist; quiet check uses no model. Prior JSON: frozen trigger.state. Return/json({ fire: boolean, message?: string, state?: JSONValue }); new state only; never mutate old.
+- fire:false: save state; no payload/run history. fire:true: run payload; append message to systemEvent/agentTurn. Fired state saves only after payload success. Check reads; payload acts.
+- Silent watcher: top-level delivery.mode="none". Isolated agentTurn with no delivery => announce; missing route may fail payload.
+- once:true: disable after first successful fired payload. Limits/check: 30s, 5 tool calls, 16KB state.
+- Tools via hidden Code Mode catalog: await tools.call("exec", { command: "..." }); unclear id -> search/describe.
 
 For "at", ISO timestamps without timezone are UTC.
 

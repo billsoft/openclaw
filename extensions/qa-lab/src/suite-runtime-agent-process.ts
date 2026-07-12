@@ -6,6 +6,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { formatErrorMessage } from "openclaw/plugin-sdk/error-runtime";
 import { resolveTimerTimeoutMs } from "openclaw/plugin-sdk/number-runtime";
 import { isRecord } from "openclaw/plugin-sdk/string-coerce-runtime";
+import { truncateUtf16Safe } from "openclaw/plugin-sdk/text-utility-runtime";
 import {
   appendQaChildOutput,
   appendQaChildOutputTail,
@@ -45,6 +46,7 @@ type QaChatHistoryResponse = {
 type QaAgentWaitResult = {
   status?: string;
   error?: string;
+  stopReason?: string;
 };
 
 const ANSI_ESCAPE_PATTERN = new RegExp(String.raw`\x1B\[[0-?]*[ -/]*[@-~]`, "g");
@@ -212,7 +214,7 @@ function parseQaCliJsonOutput(text: string, args: readonly string[]) {
         // Keep looking for the actual payload line.
       }
     }
-    throw new Error(`qa cli returned non-JSON stdout: ${cleaned.slice(0, 240)}`);
+    throw new Error(`qa cli returned non-JSON stdout: ${truncateUtf16Safe(cleaned, 240)}`);
   }
 }
 
@@ -317,6 +319,7 @@ async function startAgentRun(
     threadId?: string;
     provider?: string;
     model?: string;
+    taskTracking?: boolean;
     timeoutMs?: number;
     attachments?: Array<{
       mimeType: string;
@@ -325,6 +328,28 @@ async function startAgentRun(
     }>;
   },
 ) {
+  if (params.taskTracking === false) {
+    const target = params.to ?? "dm:qa-operator";
+    const delivery = env.transport.buildAgentDelivery({ target });
+    const started = (await env.gateway.call(
+      "chat.send",
+      {
+        idempotencyKey: randomUUID(),
+        sessionKey: params.sessionKey,
+        message: params.message,
+        deliver: true,
+        originatingChannel: delivery.replyChannel,
+        originatingTo: delivery.replyTo,
+      },
+      {
+        timeoutMs: params.timeoutMs ?? 30_000,
+      },
+    )) as { runId?: string; status?: string };
+    if (!started.runId) {
+      throw new Error(`chat.send did not return a runId: ${JSON.stringify(started)}`);
+    }
+    return started;
+  }
   const target = params.to ?? "dm:qa-operator";
   const delivery = env.transport.buildAgentDelivery({ target });
   const started = (await env.gateway.call(

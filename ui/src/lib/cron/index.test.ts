@@ -9,6 +9,7 @@ import {
   loadCronRuns,
   loadMoreCronRuns,
   normalizeCronFormState,
+  resolveConfiguredCronModelSuggestions,
   runCronJob,
   startCronEdit,
   startCronClone,
@@ -39,7 +40,7 @@ function createState(overrides: Partial<CronState> = {}): CronState {
     cronStatus: null,
     cronError: null,
     cronForm: { ...DEFAULT_CRON_FORM },
-    cronFormCollapsed: false,
+    cronCreateOpen: false,
     cronFieldErrors: {},
     cronEditingJobId: null,
     cronRunsJobId: null,
@@ -108,6 +109,48 @@ type EmptyCronListResponse = {
 };
 
 describe("cron controller", () => {
+  it("collects configured model suggestions from defaults and per-agent entries", () => {
+    expect(
+      resolveConfiguredCronModelSuggestions({
+        agents: {
+          defaults: {
+            model: {
+              primary: "openai/gpt-5.2",
+              fallbacks: ["google/gemini-2.5-pro", "openai/gpt-5.2-mini"],
+            },
+            models: {
+              "anthropic/claude-sonnet-4-5": { alias: "smart" },
+              "openai/gpt-5.2": { alias: "main" },
+            },
+          },
+          list: {
+            writer: {
+              model: { primary: "xai/grok-4", fallbacks: ["openai/gpt-5.2-mini"] },
+            },
+            planner: {
+              model: "google/gemini-2.5-flash",
+            },
+          },
+        },
+      }),
+    ).toEqual([
+      "anthropic/claude-sonnet-4-5",
+      "google/gemini-2.5-flash",
+      "google/gemini-2.5-pro",
+      "openai/gpt-5.2",
+      "openai/gpt-5.2-mini",
+      "xai/grok-4",
+    ]);
+  });
+
+  it("returns no configured model suggestions for invalid or missing config", () => {
+    expect(resolveConfiguredCronModelSuggestions(null)).toStrictEqual([]);
+    expect(resolveConfiguredCronModelSuggestions({})).toStrictEqual([]);
+    expect(
+      resolveConfiguredCronModelSuggestions({ agents: { defaults: { model: "" } } }),
+    ).toStrictEqual([]);
+  });
+
   it("loads model suggestions from the configured model view", async () => {
     const request = vi.fn(async () => ({
       models: [
@@ -187,7 +230,7 @@ describe("cron controller", () => {
     const saved = await addCronJob(state);
 
     const addCall = findRequestCall(request.mock.calls, "cron.add");
-    expect(saved).toBe(true);
+    expect(saved.saved).toBe(true);
     const payload = requestPayload(addCall);
     expectRecordFields(payload, {
       name: "webhook job",
@@ -196,6 +239,43 @@ describe("cron controller", () => {
       mode: "webhook",
       to: "https://example.invalid/cron",
     });
+  });
+
+  it("returns the saved job id from both cron.add response shapes", async () => {
+    const responses = [{ created: true, job: { id: "job-wrapped" } }, { id: "job-bare" }];
+    for (const response of responses) {
+      const request = vi.fn(async (method: string) => {
+        if (method === "cron.add") {
+          return response;
+        }
+        if (method === "cron.list") {
+          return { jobs: [] };
+        }
+        if (method === "cron.status") {
+          return { enabled: true, jobs: 0, nextWakeAtMs: null };
+        }
+        return {};
+      });
+      const state = createState({
+        client: { request } as unknown as CronState["client"],
+        cronForm: {
+          ...DEFAULT_CRON_FORM,
+          name: "id echo",
+          scheduleKind: "cron",
+          cronExpr: "0 * * * *",
+          sessionTarget: "isolated",
+          payloadKind: "agentTurn",
+          payloadText: "run this",
+        },
+      });
+
+      const saved = await addCronJob(state);
+
+      expect(saved).toEqual({
+        saved: true,
+        jobId: "job" in response ? "job-wrapped" : "job-bare",
+      });
+    }
   });
 
   it("forwards sessionKey and delivery accountId in cron.add payload", async () => {
@@ -1388,7 +1468,7 @@ describe("cron controller", () => {
       },
     });
     const saved = await addCronJob(state);
-    expect(saved).toBe(false);
+    expect(saved.saved).toBe(false);
     expect(request).not.toHaveBeenCalled();
     expectRecordFields(state.cronFieldErrors, {
       name: "cron.errors.nameRequired",
@@ -1419,7 +1499,8 @@ describe("cron controller", () => {
 
     expect(state.cronEditingJobId).toBeNull();
     expect(state.cronForm).toEqual({ ...DEFAULT_CRON_FORM });
-    expect(state.cronFieldErrors).toEqual(validateCronForm(DEFAULT_CRON_FORM));
+    // Fresh forms start visually clean; validation re-arms on change/submit.
+    expect(state.cronFieldErrors).toEqual({});
   });
 
   it("cloning a job switches to create mode and applies copy naming", () => {
@@ -1799,20 +1880,7 @@ describe("cron controller", () => {
       cronRunsScope: "job",
       cronRunsJobId: "job-due",
     });
-    const job = {
-      id: "job-due",
-      name: "Due test",
-      enabled: true,
-      createdAtMs: 0,
-      updatedAtMs: 0,
-      schedule: { kind: "cron" as const, expr: "0 * * * *" },
-      sessionTarget: "isolated" as const,
-      wakeMode: "now" as const,
-      payload: { kind: "agentTurn" as const, message: "run" },
-      state: {},
-    };
-
-    await runCronJob(state, job, "due");
+    await runCronJob(state, "job-due", "due");
 
     expect(request).toHaveBeenCalledWith("cron.run", { id: "job-due", mode: "due" });
   });

@@ -736,7 +736,7 @@ An `openclaw doctor --fix` migration exists for the legacy `realtime.provider: "
     provider: "openai",
     transcriptionProvider: "openai",
     voiceProvider: "google",
-    model: "gemini-2.5-flash-native-audio-preview-12-2025",
+    model: "gemini-3.1-flash-live-preview",
     agentId: "jay",
     toolPolicy: "owner",
     introMessage: "Say exactly: I'm here.",
@@ -805,6 +805,12 @@ Twilio-only config:
 
 With `voiceCall.enabled: true` (the default) and Twilio transport, Voice Call places the DTMF sequence before opening the realtime media stream, then uses the saved intro text as the initial realtime greeting. If `voice-call` is not enabled, Google Meet can still validate and record the dial plan but cannot place the Twilio call.
 
+Leave `voiceCall.gatewayUrl` unset to use the local trusted Gateway runtime, which preserves the
+invoking agent for the full call. A configured Gateway URL remains an explicit WebSocket target and
+cannot authenticate plugin provenance; non-default agent joins fail closed instead of silently
+using another agent. Run Google Meet and Voice Call in the same Gateway process when per-agent
+routing is required.
+
 ## Tool
 
 Agents use the `google_meet` tool:
@@ -832,13 +838,15 @@ Agents use the `google_meet` tool:
 | `attendance`            | List participants and participant sessions                                                        |
 | `export`                | Write the artifacts/attendance/transcript/manifest bundle; set `"dryRun": true` for manifest-only |
 | `recover_current_tab`   | Focus/inspect an existing Meet tab without opening a new one                                      |
-| `leave`                 | End a session (hangs up the underlying Twilio call for delegated sessions)                        |
+| `leave`                 | End a session (Chrome clicks Leave; closes only tabs it opened; Twilio hangs up)                  |
 | `end_active_conference` | End the active Google Meet conference for an API-managed space                                    |
 | `speak`                 | Make the realtime agent speak immediately, given `sessionId` and `message`                        |
 | `test_speech`           | Create/reuse a session, trigger a known phrase, return Chrome health                              |
 | `test_listen`           | Create/reuse an observe-only session, wait for caption/transcript movement                        |
 
 `test_speech` always forces `mode: "agent"` or `"bidi"` and fails if asked to run in `mode: "transcribe"`, because observe-only sessions cannot emit speech. Its `speechOutputVerified` result is based on realtime audio output bytes increasing during that call, so a reused session with older audio does not count as a fresh check.
+
+For Chrome transports, `leave` keeps a reused user-owned tab open after clicking Meet's Leave call button. Tabs opened by OpenClaw are closed after departure.
 
 Use `transport: "chrome"` when Chrome runs on the Gateway host, `transport: "chrome-node"` when it runs on a paired node. In both cases the model providers and `openclaw_agent_consult` run on the Gateway host, so model credentials stay there. Agent-mode logs include the resolved transcription provider/model at bridge startup and the TTS provider/model/voice/output format/sample rate after each synthesized reply. Raw `mode: "realtime"` is still accepted as a legacy compatibility alias for `mode: "agent"`, but it is no longer advertised in the tool's `mode` enum.
 

@@ -1,5 +1,6 @@
 // Handles TUI keyboard, paste, backend, and command events.
 import { normalizeLowercaseStringOrEmpty } from "@openclaw/normalization-core/string-coerce";
+import { truncateUtf16Safe } from "@openclaw/normalization-core/utf16-slice";
 import { classifyFailoverReason, isAuthErrorMessage } from "../agents/embedded-agent-helpers.js";
 import { parseAgentSessionKey } from "../sessions/session-key-utils.js";
 import { formatRawAssistantErrorForUi } from "../shared/assistant-error-format.js";
@@ -53,7 +54,7 @@ function formatAbortDiagnostic(value: string | undefined): string | undefined {
     return undefined;
   }
   return diagnostic.length > MAX_ABORT_DIAGNOSTIC_LENGTH
-    ? `${diagnostic.slice(0, MAX_ABORT_DIAGNOSTIC_LENGTH - 1)}…`
+    ? `${truncateUtf16Safe(diagnostic, MAX_ABORT_DIAGNOSTIC_LENGTH - 1)}…`
     : diagnostic;
 }
 
@@ -108,6 +109,7 @@ export function createEventHandlers(context: EventHandlerContext) {
   const historyReloadRunIds = new Set<string>();
   const historyOwnedReloadRunIds = new Set<string>();
   const historyDisplayedReloadRunIds = new Set<string>();
+  const liveTerminalErrorMessages = new Map<string, string>();
   const queuedHistoryReloadRunIds = new Set<string>();
   const deferredHistoryRunEvents = new Map<string, ChatEvent>();
   let historyReloadInFlight = false;
@@ -132,6 +134,29 @@ export function createEventHandlers(context: EventHandlerContext) {
   let streamingWatchdogTimer: ReturnType<typeof setTimeout> | null = null;
   let streamingWatchdogRunId: string | null = null;
 
+  const reloadHistoryPreservingTerminalErrors = async (): Promise<TuiHistoryLoadResult> => {
+    if (!loadHistory) {
+      return { loaded: false };
+    }
+    const reloadGeneration = historyReloadGeneration;
+    const result = (await loadHistory()) ?? { loaded: false };
+    if (!result.loaded || reloadGeneration !== historyReloadGeneration) {
+      return result;
+    }
+    let restored = false;
+    for (const [runId, message] of liveTerminalErrorMessages) {
+      if (!finalizedRunsWithDisplay.has(runId)) {
+        continue;
+      }
+      chatLog.addSystem(message);
+      restored = true;
+    }
+    if (restored) {
+      tui.requestRender(true);
+    }
+    return result;
+  };
+
   const flushPendingHistoryRefreshIfIdle = () => {
     if (
       !pendingHistoryRefresh ||
@@ -142,7 +167,7 @@ export function createEventHandlers(context: EventHandlerContext) {
       return;
     }
     pendingHistoryRefresh = false;
-    void loadHistory?.();
+    void reloadHistoryPreservingTerminalErrors();
   };
 
   const clearStreamingWatchdog = () => {
@@ -180,6 +205,7 @@ export function createEventHandlers(context: EventHandlerContext) {
     historyReloadRunIds.clear();
     historyOwnedReloadRunIds.clear();
     historyDisplayedReloadRunIds.clear();
+    liveTerminalErrorMessages.clear();
     queuedHistoryReloadRunIds.clear();
     deferredHistoryRunEvents.clear();
     finalizedRuns.clear();
@@ -220,7 +246,7 @@ export function createEventHandlers(context: EventHandlerContext) {
         state.activityStatus = "idle";
         setActivityStatus("idle");
         pendingHistoryRefresh = false;
-        void loadHistory?.();
+        void reloadHistoryPreservingTerminalErrors();
         tui.requestRender();
         return;
       }
@@ -336,6 +362,11 @@ export function createEventHandlers(context: EventHandlerContext) {
     pruneRunMap(finalizedRuns);
     pruneRunMap(finalizedRunsWithDisplay);
     pruneRunMap(completedRuns);
+    for (const retainedRunId of liveTerminalErrorMessages.keys()) {
+      if (!finalizedRunsWithDisplay.has(retainedRunId)) {
+        liveTerminalErrorMessages.delete(retainedRunId);
+      }
+    }
   };
 
   const notePostFinalizingRun = (runId: string) => {
@@ -471,10 +502,12 @@ export function createEventHandlers(context: EventHandlerContext) {
     }
     const renderedError = formatRawAssistantErrorForUi(errorMessage);
     chatLog.dismissPendingSystem(runId);
-    chatLog.addSystem(resolveAuthErrorHint(errorMessage) ?? `run error: ${renderedError}`);
+    const displayMessage = resolveAuthErrorHint(errorMessage) ?? `run error: ${renderedError}`;
+    liveTerminalErrorMessages.set(runId, displayMessage);
+    chatLog.addSystem(displayMessage);
     noteFinalizedRun(runId, { displayedFinal: true });
     terminateRun({ runId, wasActiveRun, status: "error" });
-    maybeRefreshHistoryForRun(runId);
+    maybeRefreshHistoryForRun(runId, { hasDisplayableFinal: true });
     return true;
   };
 
@@ -538,7 +571,7 @@ export function createEventHandlers(context: EventHandlerContext) {
       return;
     }
     pendingHistoryRefresh = false;
-    void loadHistory?.();
+    void reloadHistoryPreservingTerminalErrors();
   };
 
   const messageHasDisplayableNonTextContent = (message: unknown): boolean => {
@@ -812,7 +845,7 @@ export function createEventHandlers(context: EventHandlerContext) {
         }
       }
     };
-    void loadHistory()
+    void reloadHistoryPreservingTerminalErrors()
       .then(finishReload, () => finishReload({ loaded: false }))
       .finally(() => {
         historyReloadInFlight = false;
@@ -941,7 +974,7 @@ export function createEventHandlers(context: EventHandlerContext) {
     if (reloadingRunIds.size > 0) {
       queueHistoryReload(reloadingRunIds, finalizedRunIds, displayedRunIds);
     } else if (loadHistory) {
-      void loadHistory();
+      void reloadHistoryPreservingTerminalErrors();
     } else {
       void refreshSessionInfo?.();
     }
@@ -1142,6 +1175,7 @@ export function createEventHandlers(context: EventHandlerContext) {
     historyReloadRunIds.clear();
     historyOwnedReloadRunIds.clear();
     historyDisplayedReloadRunIds.clear();
+    liveTerminalErrorMessages.clear();
     queuedHistoryReloadRunIds.clear();
     deferredHistoryRunEvents.clear();
     clearStreamingWatchdog();
