@@ -2,6 +2,7 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
+import { expectDefined } from "@openclaw/normalization-core";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   createEmptyChangedLanes,
@@ -102,7 +103,12 @@ function runChangedFormatLaneWithRepoOxfmt(cwd: string, changedPaths: string[]) 
   const packageJson = JSON.parse(readFileSync(path.join(repoRoot, "package.json"), "utf8")) as {
     scripts: Record<string, string>;
   };
-  const [scriptBin, ...scriptArgs] = packageJson.scripts["format:check"].split(" ");
+  const formatScript = expectDefined(
+    packageJson.scripts["format:check"],
+    "format:check package script",
+  );
+  const [rawScriptBin, ...scriptArgs] = formatScript.split(" ");
+  const scriptBin = expectDefined(rawScriptBin, "format:check script binary");
   expect(scriptBin).toBe("oxfmt");
   const invocation = resolveOxfmtInvocation(
     [...scriptArgs, ...(formatCommand?.args.slice(1) ?? [])],
@@ -955,7 +961,10 @@ describe("scripts/changed-lanes", () => {
       { name: "conflict markers", args: ["check:no-conflict-markers"] },
       { CI: "1", PATH: "/usr/bin" },
     );
-    const [shimDir] = (command.env?.PATH ?? "").split(path.delimiter);
+    const shimDir = expectDefined(
+      (command.env?.PATH ?? "").split(path.delimiter)[0],
+      "CI Corepack pnpm shim directory",
+    );
 
     expect(path.basename(shimDir)).toMatch(/^openclaw-corepack-pnpm-/u);
     expect(existsSync(path.join(shimDir, "pnpm"))).toBe(true);
@@ -1267,6 +1276,7 @@ describe("scripts/changed-lanes", () => {
     });
     expect(plan.commands.map((command) => command.name)).toEqual([
       "conflict markers",
+      "TypeScript LOC ratchet",
       "changelog attributions",
       "guarded extension wildcard re-exports",
       "plugin-sdk wildcard re-exports",
@@ -1551,6 +1561,7 @@ describe("scripts/changed-lanes", () => {
     });
     expect(plan.commands.map((command) => command.args[0])).toEqual([
       "check:no-conflict-markers",
+      "check:loc",
       "check:changelog-attributions",
       "lint:extensions:no-guarded-wildcard-reexports",
       "lint:extensions:no-plugin-sdk-wildcard-reexports",
@@ -2121,6 +2132,7 @@ describe("scripts/changed-lanes", () => {
     });
     expect(plan.commands).toEqual([
       { name: "conflict markers", args: ["check:no-conflict-markers"] },
+      { name: "TypeScript LOC ratchet", args: ["check:loc"] },
       { name: "changelog attributions", args: ["check:changelog-attributions"] },
       {
         name: "guarded extension wildcard re-exports",
@@ -2143,6 +2155,7 @@ describe("scripts/changed-lanes", () => {
     expect(result.docsOnly).toBe(true);
     expect(plan.commands).toEqual([
       { name: "conflict markers", args: ["check:no-conflict-markers"] },
+      { name: "TypeScript LOC ratchet", args: ["check:loc"] },
       { name: "changelog attributions", args: ["check:changelog-attributions"] },
       {
         name: "guarded extension wildcard re-exports",

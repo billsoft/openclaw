@@ -7,18 +7,21 @@ vi.mock("../markdown.ts", async (importOriginal) => await importOriginal());
 vi.mock("../tool-display.ts", () => ({
   formatToolDetail: (display: { detail?: string }) => display.detail,
   resolveToolDisplay: ({ name, args }: { name: string; args?: unknown }) => {
+    const argRecord =
+      args && typeof args === "object" && !Array.isArray(args)
+        ? (args as Record<string, unknown>)
+        : undefined;
     const labels: Record<string, string> = {
       sessions_spawn: "Sub-agent",
       skill_workshop: "Skill Workshop",
       web_search: "Web Search",
     };
     const detail =
-      name === "skill_workshop" &&
-      args &&
-      typeof args === "object" &&
-      typeof (args as { action?: unknown }).action === "string"
-        ? (args as { action: string }).action
-        : undefined;
+      name === "skill_workshop" && typeof argRecord?.action === "string"
+        ? argRecord.action
+        : name === "read" && typeof argRecord?.path === "string"
+          ? argRecord.path
+          : undefined;
     return {
       name,
       label: labels[name] ?? name,
@@ -28,7 +31,10 @@ vi.mock("../tool-display.ts", () => ({
   },
 }));
 
-import { resolveMcpAppSandboxUrl } from "../../../components/mcp-app-view.ts";
+import {
+  buildMcpAppHostCapabilities,
+  resolveMcpAppSandboxUrl,
+} from "../../../components/mcp-app-view.ts";
 import { t } from "../../../i18n/index.ts";
 import {
   formatDistinctCollapsedToolSummaryText,
@@ -66,6 +72,15 @@ function pointerClick(element: Element) {
 }
 
 describe("tool-cards", () => {
+  it("advertises the CSP actually applied to MCP Apps", () => {
+    expect(
+      buildMcpAppHostCapabilities({ connectDomains: ["https://api.example.com"] }),
+    ).toMatchObject({
+      sandbox: { csp: { connectDomains: ["https://api.example.com"] } },
+    });
+    expect(buildMcpAppHostCapabilities()).toMatchObject({ sandbox: { csp: {} } });
+  });
+
   it("accepts only the dedicated-origin MCP App sandbox endpoint", () => {
     expect(
       resolveMcpAppSandboxUrl(
