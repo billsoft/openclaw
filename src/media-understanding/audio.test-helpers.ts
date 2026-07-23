@@ -48,7 +48,10 @@ export function installPinnedHostnameTestHooks(): void {
 }
 
 /** Creates a fetch mock that records the outbound Authorization header. */
-export function createAuthCaptureJsonFetch(responseBody: unknown) {
+export function createAuthCaptureJsonFetch(responseBody: unknown): {
+  fetchFn: typeof globalThis.fetch;
+  getAuthHeader: () => string | null;
+} {
   let seenAuth: string | null = null;
   const fetchFn = withFetchPreconnect(async (_input: RequestInfo | URL, init?: RequestInit) => {
     const headers = new Headers(init?.headers);
@@ -65,7 +68,10 @@ export function createAuthCaptureJsonFetch(responseBody: unknown) {
 }
 
 /** Creates a fetch mock that records the outbound URL and init payload. */
-export function createRequestCaptureJsonFetch(responseBody: unknown) {
+export function createRequestCaptureJsonFetch(responseBody: unknown): {
+  fetchFn: typeof globalThis.fetch;
+  getRequest: () => { url: string | null; init: RequestInit | undefined };
+} {
   let seenUrl: string | null = null;
   let seenInit: RequestInit | undefined;
   const fetchFn = withFetchPreconnect(async (input: RequestInfo | URL, init?: RequestInit) => {

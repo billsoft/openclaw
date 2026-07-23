@@ -43,7 +43,7 @@ export function createDispatchReplyOperationCoordinator(params: {
   replyOptions?: DispatchFromConfigParams["replyOptions"];
   resolveOperationExpectedSessionId: () => string | undefined;
   routeThreadId?: string | number;
-}) {
+}): DispatchReplyOperationCoordinator {
   let dispatchReplyOperation: ReplyOperation | undefined;
   let dispatchAbortOperation: ReplyOperation | undefined;
   let preDispatchAbortOperation: ReplyOperation | undefined;
@@ -440,3 +440,27 @@ export function createDispatchReplyOperationCoordinator(params: {
     trackDispatchLifecycleWork,
   };
 }
+
+export type DispatchReplyOperationCoordinator = {
+  completeDispatchReplyOperation: () => void;
+  dispatchHookDispatcher: ReplyDispatcher;
+  ensureDispatchReplyOperation: (
+    phase: "pre_dispatch" | "dispatch",
+  ) => Promise<DispatchReplyOperationAcquisition>;
+  failDispatchReplyOperation: (reason: unknown) => void;
+  getDispatchAbortOperation: () => ReplyOperation | undefined;
+  getDispatchAbortSignal: () => globalThis.AbortSignal | undefined;
+  getDispatchReplyOperation: () => ReplyOperation | undefined;
+  getReplyOptions: () => DispatchFromConfigParams["replyOptions"] | undefined;
+  getObservedReplyDelivery: () => boolean;
+  getPreDispatchAbortSignal: () => globalThis.AbortSignal | undefined;
+  isDispatchOperationAborted: () => boolean;
+  isPreDispatchOperationAborted: () => boolean;
+  markObservedReplyDelivery: () => void;
+  releasePreDispatchLifecycleAdmission: (
+    afterWorkBarrier?: () => PromiseLike<unknown>,
+  ) => Promise<void>;
+  runWithDispatchLifecycleAdmission: <T>(work: () => Promise<T>) => Promise<T>;
+  throwIfDispatchOperationAborted: () => void;
+  trackDispatchLifecycleWork: (work: Promise<unknown>) => void;
+};

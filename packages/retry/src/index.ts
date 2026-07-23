@@ -89,7 +89,7 @@ export class RetrySupervisor {
     this.pendingAbort = undefined;
   }
 
-  next(abortSignal?: AbortSignal) {
+  next(abortSignal?: AbortSignal): RetryAttempt | undefined {
     const override = this.nextDelayOverrideMs;
     this.nextDelayOverrideMs = undefined;
     if (override === undefined && ++this.attempts > Math.ceil(this.maxAttempts)) {
@@ -124,6 +124,12 @@ type RetryDelayContext = {
   maxAttempts: number;
   err: unknown;
   label?: string;
+};
+
+type RetryAttempt = {
+  attempt: number;
+  delayMs: number;
+  signal: AbortSignal;
 };
 
 export type RetryInfo = RetryDelayContext & {
