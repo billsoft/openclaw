@@ -25,6 +25,14 @@
     },
     "channel": {
       "id": "telegram",
+      "configuredState": {
+        "env": {
+          "anyOf": [
+            "TELEGRAM_BOT_TOKEN"
+          ]
+        }
+      },
+      "approvalFlags": ["native"],
       "label": "Telegram",
       "selectionLabel": "Telegram (Bot API)",
       "detailLabel": "Telegram Bot",
@@ -38,18 +46,30 @@
         "https://openclaw.ai"
       ],
       "markdownCapable": true,
+      "setup": {
+        "fields": [
+          {
+            "key": "token",
+            "kind": "string",
+            "sensitive": true,
+            "cli": { "flags": "--token <token>", "description": "Telegram bot token" }
+          },
+          {
+            "key": "tokenFile",
+            "kind": "string",
+            "sensitive": true,
+            "cli": { "flags": "--token-file <path>", "description": "Telegram bot token file" }
+          },
+          {
+            "key": "useEnv",
+            "kind": "boolean",
+            "cli": { "flags": "--use-env", "description": "Use TELEGRAM_BOT_TOKEN" }
+          }
+        ]
+      },
       "commands": {
         "nativeCommandsAutoEnabled": true,
         "nativeSkillsAutoEnabled": true
-      },
-      "configuredState": {
-        "env": {
-          "allOf": [
-            "TELEGRAM_BOT_TOKEN"
-          ]
-        },
-        "specifier": "./configured-state",
-        "exportName": "hasTelegramConfiguredState"
       }
     }
   }

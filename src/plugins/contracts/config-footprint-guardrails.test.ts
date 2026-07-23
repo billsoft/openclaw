@@ -139,21 +139,37 @@ describe("config footprint guardrails", () => {
     }
   });
 
-  it("keeps canonical nested streaming paths in the public core channel schema", () => {
+  it("keeps canonical nested streaming paths in channel-owned schemas", () => {
     const source = readSource("src/config/zod-schema.providers-core.ts");
+    const discordSource = readSource("extensions/discord/src/config-schema.ts");
+    const msTeamsSource = readSource("extensions/msteams/src/config-schema.ts");
+    const slackSource = readSource("extensions/slack/src/config-schema.ts");
 
-    expect(source).toContain("streaming: ChannelPreviewStreamingConfigSchema.optional(),");
-    expect(source).toContain("streaming: SlackStreamingConfigSchema.optional(),");
-    expect(source).not.toContain('streamMode: z.enum(["replace", "status_final", "append"])');
-    expect(source).not.toContain("draftChunk:");
-    expect(source).not.toContain("nativeStreaming:");
+    expect(source).toContain("streaming: TelegramPreviewStreamingConfigSchema.optional(),");
+    expect(discordSource).toContain("streaming: DiscordPreviewStreamingConfigSchema.optional(),");
+    expect(msTeamsSource).toContain("streaming: ChannelPreviewStreamingConfigSchema.optional(),");
+    expect(slackSource).toContain("streaming: SlackStreamingConfigSchema.optional(),");
+    for (const schemaSource of [source, discordSource, msTeamsSource, slackSource]) {
+      expect(schemaSource).not.toContain(
+        'streamMode: z.enum(["replace", "status_final", "append"])',
+      );
+      expect(schemaSource).not.toContain("draftChunk:");
+      expect(schemaSource).not.toContain("nativeStreaming:");
+    }
   });
 
-  it("keeps shared setup input canonical-first", () => {
+  it("keeps Matrix setup input canonical-first after plugin ownership", () => {
+    const source = readSource("extensions/matrix/src/setup-config.ts");
+    const canonicalIndex = source.indexOf("dangerouslyAllowPrivateNetwork?: boolean;");
+    const aliasIndex = source.indexOf("allowPrivateNetwork?: boolean;");
+
+    expect(canonicalIndex).toBeGreaterThanOrEqual(0);
+    expect(aliasIndex).toBeGreaterThan(canonicalIndex);
+  });
+
+  it("keeps retired config aliases out of the shared setup input", () => {
     const source = readSource("src/channels/plugins/types.core.ts");
 
-    expect(source).toContain("dangerouslyAllowPrivateNetwork?: boolean;");
-    expect(source).toContain("allowPrivateNetwork?: boolean;");
     expect(source).not.toContain("streamMode?:");
     expect(source).not.toContain("groupMentionsOnly?:");
     expect(source).not.toContain("perSession?:");
@@ -175,7 +191,6 @@ describe("config footprint guardrails", () => {
   it("keeps bundled channel schemas out of the generic channel config SDK surface", () => {
     const source = readSource("src/plugin-sdk/channel-config-schema.ts");
     const bundledSource = readSource("src/plugin-sdk/bundled-channel-config-schema.ts");
-    const legacySource = readSource("src/plugin-sdk/channel-config-schema-legacy.ts");
     const bundledSection = bundledSource.slice(
       bundledSource.indexOf("Bundled-channel config schemas"),
     );
@@ -195,12 +210,8 @@ describe("config footprint guardrails", () => {
       .toSorted((left, right) => left.localeCompare(right));
 
     expect(exportedSchemaNames).toEqual([
-      "DiscordConfigSchema",
       "GoogleChatConfigSchema",
       "IMessageConfigSchema",
-      "MSTeamsConfigSchema",
-      "SignalConfigSchema",
-      "SlackConfigSchema",
       "TelegramConfigSchema",
       "WhatsAppConfigSchema",
     ]);
@@ -209,11 +220,8 @@ describe("config footprint guardrails", () => {
     }
     expect(bundledSource).toContain("Bundled-channel config schemas");
     expect(bundledSource).toContain("openclaw/plugin-sdk/channel-config-schema");
-    expect(legacySource).toContain("Compatibility surface for bundled channel schemas");
-    expect(legacySource).toContain("openclaw/plugin-sdk/bundled-channel-config-schema");
-    expect(legacySource).toContain('export * from "./bundled-channel-config-schema.js";');
-    // Non-canonical facades are re-export shells over the canonical
-    // channel-config-schema module; only bundled provider schemas bypass it.
+    // The primitives facade re-exports the canonical channel-config-schema
+    // module; only bundled provider schemas bypass it.
     const primitivesSource = readSource("src/plugin-sdk/channel-config-primitives.ts");
     expect(primitivesSource).toContain('from "./channel-config-schema.js";');
     expect(primitivesSource).not.toContain("../channels/");
@@ -223,16 +231,14 @@ describe("config footprint guardrails", () => {
   });
 
   it("keeps internal src imports off the non-canonical channel config schema facades", () => {
-    // channel-config-schema is the canonical internal module; the primitives,
-    // bundled, and legacy shells stay export-compatible for plugins only.
+    // channel-config-schema is the canonical internal module; the primitives
+    // and bundled shells stay export-compatible for plugins only.
     const allowedShellImporters = new Set([
-      // The deprecated alias shell re-exports the bundled facade by design.
-      "src/plugin-sdk/channel-config-schema-legacy.ts",
       // This guardrail file embeds facade specifiers in shell-shape assertions.
       "src/plugins/contracts/config-footprint-guardrails.test.ts",
     ]);
     const facadeImportPattern =
-      /\bfrom\s*["'][^"']*(?:channel-config-primitives|bundled-channel-config-schema|channel-config-schema-legacy)(?:\.js)?["']/u;
+      /\bfrom\s*["'][^"']*(?:channel-config-primitives|bundled-channel-config-schema)(?:\.js)?["']/u;
     const files = listGitTrackedFiles({ repoRoot: REPO_ROOT, pathspecs: "src" }) ?? [];
 
     const offenders = files.filter((file) => {

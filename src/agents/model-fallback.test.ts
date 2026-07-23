@@ -14,40 +14,50 @@ import { resetLogger, setLoggerOverride } from "../logging/logger.js";
 import { createWarnLogCapture } from "../logging/test-helpers/warn-log-capture.js";
 import {
   clearCurrentPluginMetadataSnapshot,
-  resolvePluginMetadataControlPlaneFingerprint,
   setCurrentPluginMetadataSnapshot,
 } from "../plugins/current-plugin-metadata-snapshot.js";
-import { resolveInstalledPluginIndexPolicyHash } from "../plugins/installed-plugin-index-policy.js";
-import type { InstalledPluginIndex } from "../plugins/installed-plugin-index.js";
 import { loadPluginMetadataSnapshot } from "../plugins/plugin-metadata-snapshot.js";
-import type { PluginMetadataSnapshot } from "../plugins/plugin-metadata-snapshot.types.js";
-import { CommandLaneTaskTimeoutError } from "../process/command-queue.js";
 import { AUTH_STORE_VERSION } from "./auth-profiles/constants.js";
 import type { AuthProfileStore } from "./auth-profiles/types.js";
+import { testing as cliBackendsTesting } from "./cli-backends.test-support.js";
 import { classifyEmbeddedAgentRunResultForModelFallback } from "./embedded-agent-runner/result-fallback-classifier.js";
-import { OPENCLAW_ABORTABLE_WRAPPER } from "./embedded-agent-runner/run/abortable.js";
+import { abortable } from "./embedded-agent-runner/run/abortable.js";
 import type { EmbeddedAgentRunResult } from "./embedded-agent-runner/types.js";
 import { FailoverError } from "./failover-error.js";
-import { resetFallbackSkipCacheForTest } from "./fallback-skip-cache.js";
-import { MissingAgentHarnessError } from "./harness/errors.js";
+import { resetFallbackSkipCacheForTest } from "./fallback-skip-cache.test-support.js";
+import { AgentHarnessSessionSupersededError, MissingAgentHarnessError } from "./harness/errors.js";
 import { clearAgentHarnesses, registerAgentHarness } from "./harness/registry.js";
 import type { AgentHarness } from "./harness/types.js";
 import { LiveSessionModelSwitchError } from "./live-model-switch-error.js";
 import {
-  FallbackSummaryError,
-  testing,
+  isFallbackSummaryError,
+  resolveModelCandidateChain,
   runWithImageModelFallback,
   runWithModelFallback as runWithModelFallbackBase,
 } from "./model-fallback.js";
+import { shouldDiscardDeferredSessionSuspension } from "./model-fallback.test-support.js";
 import {
   createAgentRunDirectAbortError,
   createAgentRunRestartAbortError,
   resolveAgentRunErrorLifecycleFields,
 } from "./run-termination.js";
+import { resolveSessionSuspensionReason } from "./session-suspension.js";
 import { SessionWriteLockTimeoutError } from "./session-write-lock-error.js";
 import { makeModelFallbackCfg } from "./test-helpers/model-fallback-config-fixture.js";
 
+const testing = {
+  resolveFallbackCandidates: resolveModelCandidateChain,
+  resolveSessionSuspensionReason,
+  shouldDiscardDeferredSessionSuspension,
+};
+
 type ProviderModelNormalizationParams = { provider: string; context: { modelId: string } };
+
+function makeCommandLaneTaskTimeoutError(lane: string, timeoutMs: number): Error {
+  const error = new Error(`Command lane "${lane}" task timed out after ${timeoutMs}ms`);
+  error.name = "CommandLaneTaskTimeoutError";
+  return error;
+}
 
 vi.mock("../infra/file-lock.js", () => ({
   withFileLock: async <T>(_filePath: string, _options: unknown, run: () => Promise<T>) => run(),
@@ -148,6 +158,7 @@ const authRuntimeMock = vi.hoisted(() => {
       loadAuthProfileStoreForRuntime: vi.fn((agentDir?: string) => getStore(agentDir)),
       resolveAuthProfileOrder: (params: { store: AuthProfileStore; provider: string }) =>
         getProfileIds(params.store, params.provider),
+      maybeReprobeWhamBlockedProfiles: vi.fn(),
       isProfileInCooldown,
       resolveProfilesUnavailableReason: (params: {
         store: AuthProfileStore;
@@ -189,7 +200,7 @@ const authRuntimeMock = vi.hoisted(() => {
   };
 });
 
-vi.mock("./model-fallback-auth.runtime.js", () => authRuntimeMock.runtime);
+vi.mock("./auth-profiles.runtime.js", () => authRuntimeMock.runtime);
 
 const makeCfg = makeModelFallbackCfg;
 let authTempRoot = "";
@@ -229,69 +240,10 @@ function setDefaultPluginMetadataSnapshot(): void {
   });
 }
 
-function createModelNormalizerSnapshot(params: {
-  manifestHash: string;
-  prefix: string;
-}): PluginMetadataSnapshot {
-  // Builds a process-stable plugin metadata snapshot with one model normalizer
-  // so fallback can prove manifest-policy cache invalidation.
-  const policyHash = resolveInstalledPluginIndexPolicyHash({});
-  const index: InstalledPluginIndex = {
-    version: 1,
-    hostContractVersion: "test-host",
-    compatRegistryVersion: "test-compat",
-    migrationVersion: 1,
-    policyHash,
-    generatedAtMs: 0,
-    installRecords: {},
-    plugins: [
-      {
-        pluginId: "fallback-normalizer",
-        manifestPath: `/tmp/fallback-normalizer-${params.manifestHash}/openclaw.plugin.json`,
-        manifestHash: params.manifestHash,
-        source: `/tmp/fallback-normalizer-${params.manifestHash}/index.ts`,
-        rootDir: `/tmp/fallback-normalizer-${params.manifestHash}`,
-        origin: "global",
-        enabled: true,
-        startup: {
-          sidecar: false,
-          memory: false,
-          deferConfiguredChannelFullLoadUntilAfterListen: false,
-          agentHarnesses: [],
-        },
-        compat: [],
-      },
-    ],
-    diagnostics: [],
-  };
-  return {
-    policyHash,
-    configFingerprint: resolvePluginMetadataControlPlaneFingerprint(
-      {},
-      {
-        env: process.env,
-        index,
-        policyHash,
-      },
-    ),
-    index,
-    registryDiagnostics: [],
-    plugins: [
-      {
-        id: "fallback-normalizer",
-        modelIdNormalization: {
-          providers: {
-            demo: {
-              prefixWhenBare: params.prefix,
-            },
-          },
-        },
-      },
-    ],
-  } as unknown as PluginMetadataSnapshot;
-}
-
-afterEach(resetModelFallbackTestState);
+afterEach(() => {
+  resetModelFallbackTestState();
+  cliBackendsTesting.resetDepsForTest();
+});
 
 beforeEach(() => {
   setLoggerOverride({ level: "silent", consoleLevel: "silent" });
@@ -426,9 +378,9 @@ async function captureRejection(promise: Promise<unknown>): Promise<unknown> {
   throw new Error("expected rejection");
 }
 
-function requireFallbackSummaryError(error: unknown): FallbackSummaryError {
-  expect(error).toBeInstanceOf(FallbackSummaryError);
-  if (!(error instanceof FallbackSummaryError)) {
+function requireFallbackSummaryError(error: unknown) {
+  expect(isFallbackSummaryError(error)).toBe(true);
+  if (!isFallbackSummaryError(error)) {
     throw error;
   }
   return error;
@@ -679,7 +631,7 @@ describe("runWithModelFallback", () => {
         : [];
     });
     expect(result).toBe(expectError ? undefined : "ok");
-    expect(thrown instanceof FallbackSummaryError).toBe(expectError);
+    expect(isFallbackSummaryError(thrown)).toBe(expectError);
     expect(diagnostics.events).toMatchObject(expectedEvents);
   });
 
@@ -1403,10 +1355,15 @@ describe("runWithModelFallback", () => {
   });
 
   it("prefers a prepared harness over a colliding CLI runtime id", async () => {
+    cliBackendsTesting.setDepsForTest({
+      resolvePluginSetupCliBackend: () => undefined,
+      resolveRuntimeCliBackends: () => [
+        { id: "codex", pluginId: "test-codex-cli", config: { command: "codex" } },
+      ],
+    });
     const cfg = makeCfg({
       agents: {
         defaults: {
-          cliBackends: { codex: { command: "codex" } },
           model: { primary: "anthropic/claude-sonnet-4-6" },
         },
       },
@@ -1496,9 +1453,6 @@ describe("runWithModelFallback", () => {
     const cfg = makeCfg({
       agents: {
         defaults: {
-          cliBackends: {
-            "claude-cli": { command: "claude" },
-          },
           model: {
             primary: "claude-cli/opus",
           },
@@ -1542,7 +1496,7 @@ describe("runWithModelFallback", () => {
 
   it("does not treat command-lane watchdog timeouts as model fallback failures", async () => {
     const cfg = makeCfg();
-    const timeoutError = new CommandLaneTaskTimeoutError("cron-nested", 330_000);
+    const timeoutError = makeCommandLaneTaskTimeoutError("cron-nested", 330_000);
     const run = vi.fn().mockRejectedValue(timeoutError);
 
     await expect(
@@ -1581,6 +1535,33 @@ describe("runWithModelFallback", () => {
         run,
       }),
     ).rejects.toBe(takeoverError);
+    expect(run).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not retry a superseded harness session generation on fallback models", async () => {
+    const cfg = makeCfg({
+      agents: {
+        defaults: {
+          model: {
+            primary: "openai/gpt-5.4",
+            fallbacks: ["anthropic/claude-sonnet-4-6", "openai/gpt-4.1-mini"],
+          },
+        },
+      },
+    });
+    const supersededError = new AgentHarnessSessionSupersededError(
+      "Codex session generation is no longer current: session-old",
+    );
+    const run = vi.fn().mockRejectedValue(supersededError);
+
+    await expect(
+      runWithModelFallback({
+        cfg,
+        provider: "openai",
+        model: "gpt-5.4",
+        run,
+      }),
+    ).rejects.toBe(supersededError);
     expect(run).toHaveBeenCalledTimes(1);
   });
 
@@ -2405,6 +2386,7 @@ describe("runWithModelFallback", () => {
             primary: "openai/gpt-4.1-mini",
             fallbacks: ["anthropic/claude-haiku-3-5", "openrouter/deepseek-chat"],
           },
+          modelPolicy: { allow: ["openai/gpt-4.1-mini"] },
         },
       },
     });
@@ -3129,54 +3111,6 @@ describe("runWithModelFallback", () => {
     ).toEqual([{ provider: "ollama", model: "llama3" }]);
   });
 
-  it("does not reuse fallback candidate cache entries across manifest normalization snapshots", () => {
-    const cfg = makeCfg({
-      agents: {
-        defaults: {
-          model: {
-            fallbacks: [],
-          },
-        },
-      },
-    });
-
-    try {
-      setCurrentPluginMetadataSnapshot(
-        createModelNormalizerSnapshot({
-          manifestHash: "alpha",
-          prefix: "alpha",
-        }),
-        { config: {}, env: process.env },
-      );
-      expect(
-        testing.resolveFallbackCandidates({
-          cfg,
-          provider: "demo",
-          model: "demo-model",
-          fallbacksOverride: [],
-        }),
-      ).toEqual([{ provider: "demo", model: "alpha/demo-model" }]);
-
-      setCurrentPluginMetadataSnapshot(
-        createModelNormalizerSnapshot({
-          manifestHash: "bravo",
-          prefix: "bravo",
-        }),
-        { config: {}, env: process.env },
-      );
-      expect(
-        testing.resolveFallbackCandidates({
-          cfg,
-          provider: "demo",
-          model: "demo-model",
-          fallbacksOverride: [],
-        }),
-      ).toEqual([{ provider: "demo", model: "bravo/demo-model" }]);
-    } finally {
-      setDefaultPluginMetadataSnapshot();
-    }
-  });
-
   it("defaults provider/model when missing (regression #946)", () => {
     const cfg = makeCfg({
       agents: {
@@ -3868,11 +3802,18 @@ describe("runWithModelFallback", () => {
       return err;
     }
 
-    function makeAbortableWrapper(reason: Error): Error {
-      const err = new Error(reason.message, { cause: reason });
-      err.name = "AbortError";
-      (err as Error & { [OPENCLAW_ABORTABLE_WRAPPER]?: true })[OPENCLAW_ABORTABLE_WRAPPER] = true;
-      return err;
+    async function makeAbortableWrapper(reason: Error): Promise<Error> {
+      const controller = new AbortController();
+      controller.abort(reason);
+      try {
+        await abortable(controller.signal, Promise.resolve());
+      } catch (error: unknown) {
+        if (!(error instanceof Error)) {
+          throw new Error("abortable() rejected with a non-Error value", { cause: error });
+        }
+        return error;
+      }
+      throw new Error("abortable() unexpectedly resolved after abort");
     }
 
     function makeAbortWrapper(reason: Error): Error {
@@ -3938,7 +3879,7 @@ describe("runWithModelFallback", () => {
 
       const innerTimeout = new Error("request timed out");
       innerTimeout.name = "TimeoutError";
-      const outerWrap = makeAbortableWrapper(innerTimeout);
+      const outerWrap = await makeAbortableWrapper(innerTimeout);
       const controller = makeTaggedAbortController(outerWrap);
 
       await expect(
@@ -3958,7 +3899,7 @@ describe("runWithModelFallback", () => {
       const cfg = makeCfg();
       const innerTimeout = new Error("request timed out");
       innerTimeout.name = "TimeoutError";
-      const outerAbort = makeAbortableWrapper(innerTimeout);
+      const outerAbort = await makeAbortableWrapper(innerTimeout);
       const run = vi.fn().mockRejectedValue(outerAbort);
 
       await expect(
@@ -3977,7 +3918,7 @@ describe("runWithModelFallback", () => {
       const cfg = makeCfg();
       const innerDisconnect = new Error("client disconnected");
       innerDisconnect.name = "ClientDisconnectError";
-      const outerAbort = makeAbortableWrapper(innerDisconnect);
+      const outerAbort = await makeAbortableWrapper(innerDisconnect);
       const run = vi.fn().mockRejectedValue(outerAbort);
 
       await expect(
@@ -3995,7 +3936,7 @@ describe("runWithModelFallback", () => {
     it("rethrows when thrown error has restart abort in cause chain", async () => {
       const cfg = makeCfg();
       const restartAbort = createAgentRunRestartAbortError();
-      const outerAbort = makeAbortableWrapper(restartAbort);
+      const outerAbort = await makeAbortableWrapper(restartAbort);
       const run = vi.fn().mockRejectedValueOnce(outerAbort).mockResolvedValueOnce("ok");
 
       await expect(
@@ -4028,12 +3969,12 @@ describe("runWithModelFallback", () => {
       expect(run).toHaveBeenCalledTimes(1);
     });
 
-    it("discards deferred session suspension for private terminal abort wrappers", () => {
+    it("discards deferred session suspension for private terminal abort wrappers", async () => {
       const timeout = new Error("request timed out");
       timeout.name = "TimeoutError";
       expect(
         testing.shouldDiscardDeferredSessionSuspension({
-          error: makeAbortableWrapper(timeout),
+          error: await makeAbortableWrapper(timeout),
         }),
       ).toBe(true);
 
@@ -4518,3 +4459,4 @@ describe("runWithModelFallback preserved prompt errors", () => {
     expect(run).toHaveBeenCalledTimes(1);
   });
 });
+/* oxlint-disable max-lines -- TODO: split this grandfathered oversized file. */

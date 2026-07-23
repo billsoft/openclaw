@@ -6,8 +6,8 @@ import type { StuckSessionRecoveryOutcome } from "../../logging/diagnostic-sessi
 import type {
   PluginHookBeforeDispatchResult,
   PluginHookReplyDispatchResult,
-  PluginTargetedInboundClaimOutcome,
-} from "../../plugins/hooks.js";
+} from "../../plugins/hook-types.js";
+import type { createHookRunner } from "../../plugins/hooks.js";
 import { setActivePluginRegistry } from "../../plugins/runtime.js";
 import {
   createChannelTestPluginBase,
@@ -15,7 +15,8 @@ import {
 } from "../../test-utils/channel-plugins.js";
 import { copyReplyPayloadMetadata } from "../reply-payload.js";
 import type { ReplyPayload } from "../types.js";
-import type { ReplyDispatchBeforeDeliver, ReplyDispatcher } from "./reply-dispatcher.js";
+import type { ReplyDispatchBeforeDeliver } from "./reply-dispatcher.js";
+import type { ReplyDispatcher } from "./reply-dispatcher.types.js";
 import { buildTestCtx } from "./test-ctx.js";
 
 type AbortResult = {
@@ -24,6 +25,9 @@ type AbortResult = {
   rejectionReason?: "finalizing";
   stoppedSubagents?: number;
 };
+type PluginTargetedInboundClaimOutcome = Awaited<
+  ReturnType<ReturnType<typeof createHookRunner>["runInboundClaimForPluginOutcome"]>
+>;
 
 const mocks = vi.hoisted(() => ({
   isRoutableChannel: vi.fn((_channel: string | undefined) => true),
@@ -35,6 +39,9 @@ const mocks = vi.hoisted(() => ({
 }));
 const globalMocks = vi.hoisted(() => ({
   logVerbose: vi.fn(),
+}));
+const askUserMocks = vi.hoisted(() => ({
+  isAskUserPromptPending: vi.fn(async () => true),
 }));
 const diagnosticMocks = vi.hoisted(() => ({
   logMessageDispatchCompleted: vi.fn(),
@@ -127,7 +134,7 @@ const sessionStoreMocks = vi.hoisted(() => ({
   currentEntry: undefined as Record<string, unknown> | undefined,
   entriesBySessionKey: new Map<string, Record<string, unknown>>(),
   loadSessionEntry: vi.fn((..._args: unknown[]) => sessionStoreMocks.currentEntry),
-  loadSessionStoreEntry: vi.fn(() => sessionStoreMocks.currentEntry),
+  loadSessionStoreEntry: vi.fn((..._args: unknown[]) => sessionStoreMocks.currentEntry),
   loadSessionStore: vi.fn(() => ({})),
   readSessionEntry: vi.fn(() => sessionStoreMocks.currentEntry),
   resolveStorePath: vi.fn(() => "/tmp/mock-sessions.json"),
@@ -306,10 +313,16 @@ const conversationBindingMocks = vi.hoisted(() => {
       if (!conversationId) {
         return null;
       }
+      const rawThreadParentId = resolveTarget(channel, params.ctx.ThreadParentId);
+      const explicitThreadParentId =
+        channel === "discord" && rawThreadParentId && !rawThreadParentId.includes(":")
+          ? `channel:${rawThreadParentId}`
+          : rawThreadParentId;
       const parentConversationId =
-        threadId && baseConversationId && baseConversationId !== threadId
+        explicitThreadParentId ??
+        (threadId && baseConversationId && baseConversationId !== threadId
           ? baseConversationId
-          : resolveTarget(channel, params.ctx.ThreadParentId);
+          : undefined);
       return {
         channel,
         accountId: resolveAccountId(params.ctx, params.cfg, channel),
@@ -365,14 +378,13 @@ export {
   acpManagerRuntimeMocks,
   acpMocks,
   agentEventMocks,
-  conversationBindingMocks,
+  askUserMocks,
   diagnosticMocks,
   globalMocks,
   hookMocks,
   internalHookMocks,
   messageAuditMocks,
   mocks,
-  pluginConversationBindingMocks,
   replyMediaPathMocks,
   runtimePluginMocks,
   sessionBindingMocks,
@@ -436,6 +448,10 @@ vi.mock("../../globals.js", async (importOriginal) => {
   };
 });
 
+vi.mock("../../agents/tools/ask-user-tool.js", () => ({
+  isAskUserPromptPending: askUserMocks.isAskUserPromptPending,
+}));
+
 vi.mock("../../logging/diagnostic.js", () => ({
   logMessageDispatchCompleted: diagnosticMocks.logMessageDispatchCompleted,
   logMessageDispatchStarted: diagnosticMocks.logMessageDispatchStarted,
@@ -446,16 +462,9 @@ vi.mock("../../logging/diagnostic.js", () => ({
   isStuckSessionRecoveryEnabled: (config?: { diagnostics?: { enabled?: boolean } }) =>
     config?.diagnostics?.enabled !== false,
   requestStuckDiagnosticSessionRecovery: diagnosticMocks.requestStuckDiagnosticSessionRecovery,
-  resolveStuckSessionWarnMs: (config?: { diagnostics?: { stuckSessionWarnMs?: number } }) =>
-    config?.diagnostics?.stuckSessionWarnMs ?? 120_000,
-  resolveStuckSessionAbortMs: (
-    config: { diagnostics?: { stuckSessionAbortMs?: number } } | undefined,
-    stuckSessionWarnMs: number,
-  ) =>
-    Math.max(
-      stuckSessionWarnMs,
-      config?.diagnostics?.stuckSessionAbortMs ?? Math.max(300_000, stuckSessionWarnMs * 3),
-    ),
+  resolveStuckSessionWarnMs: () => 120_000,
+  resolveStuckSessionAbortMs: (stuckSessionWarnMs: number) =>
+    Math.max(300_000, stuckSessionWarnMs * 3),
 }));
 vi.mock("../../audit/message-audit-events.js", () => ({
   emitTrustedMessageAuditEvent: messageAuditMocks.emitTrustedMessageAuditEvent,
@@ -482,6 +491,7 @@ vi.mock("../../config/sessions/session-accessor.js", async (importOriginal) => {
   return {
     ...actual,
     loadSessionEntry: (...args: unknown[]) => sessionStoreMocks.loadSessionEntry(...args),
+    loadSessionEntryReadOnly: (...args: unknown[]) => sessionStoreMocks.loadSessionEntry(...args),
     updateSessionEntry: (...args: Parameters<typeof sessionStoreMocks.updateSessionEntry>) =>
       sessionStoreMocks.updateSessionEntry(...args),
   };
@@ -534,7 +544,10 @@ vi.mock("../../bindings/records.js", () => ({
 vi.mock("../../infra/agent-events.js", () => ({
   emitAgentAuditEvent: (params: unknown) => agentEventMocks.emitAgentAuditEvent(params),
   emitAgentEvent: (params: unknown) => agentEventMocks.emitAgentEvent(params),
+  getAgentEventLifecycleGeneration: () => "test-generation",
+  isAgentEventLifecycleGenerationCurrent: (generation: string) => generation === "test-generation",
   onAgentEvent: (listener: unknown) => agentEventMocks.onAgentEvent(listener),
+  registerAgentEventLifecycleRotationHandler: vi.fn(),
 }));
 vi.mock("../../plugins/conversation-binding.js", () => ({
   buildPluginBindingDeclinedText: () => "Plugin binding request was declined.",
@@ -686,6 +699,7 @@ export function createDispatcher(): ReplyDispatcher {
 }
 
 export function resetPluginTtsAndThreadMocks() {
+  askUserMocks.isAskUserPromptPending.mockReset().mockResolvedValue(true);
   pluginConversationBindingMocks.shownFallbackNoticeBindingIds.clear();
   ttsMocks.state.synthesizeFinalAudio = false;
   ttsMocks.state.synthesizeToolAudio = false;
@@ -761,3 +775,4 @@ export function createHookCtx() {
     SessionKey: "agent:test:session",
   });
 }
+/* oxlint-disable max-lines -- TODO: split this grandfathered oversized file. */

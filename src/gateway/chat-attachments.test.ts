@@ -29,7 +29,6 @@ import { MAX_IMAGE_BYTES } from "@openclaw/media-core/constants";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import {
   type ChatAttachment,
-  DEFAULT_CHAT_ATTACHMENT_MAX_MB,
   parseMessageWithAttachments,
   persistInboundImagesForTranscript,
   resolveChatAttachmentMaxBytes,
@@ -493,8 +492,16 @@ describe("parseMessageWithAttachments validation errors", () => {
       expect(parsed.images).toHaveLength(0);
       expect(parsed.imageOrder).toEqual(["offloaded"]);
       expect(parsed.offloadedRefs).toHaveLength(1);
-      expect(parsed.offloadedRefs[0]?.mimeType).toBe("image/png");
-      expect(parsed.message).toMatch(/^see this\n\[media attached: media:\/\/inbound\//);
+      const offloaded = expectDefined(parsed.offloadedRefs[0], "offloaded image ref");
+      expect(offloaded.mimeType).toBe("image/png");
+      expect(parsed.message).toBe(`see this\n[media attached: ${offloaded.mediaRef}]`);
+      expect(parsed.media).toEqual([
+        {
+          path: offloaded.path,
+          url: offloaded.mediaRef,
+          contentType: "image/png",
+        },
+      ]);
       expect(infos[0]).toMatch(/Offloaded image for text-only model/i);
       expect(logs).toHaveLength(0);
     } finally {
@@ -534,7 +541,7 @@ describe("parseMessageWithAttachments validation errors", () => {
 
 describe("resolveChatAttachmentMaxBytes", () => {
   const MB = 1024 * 1024;
-  const DEFAULT_BYTES = DEFAULT_CHAT_ATTACHMENT_MAX_MB * MB;
+  const DEFAULT_BYTES = 20 * MB;
 
   const cfgWithMediaMaxMb = (value: unknown): OpenClawConfig =>
     ({ agents: { defaults: { mediaMaxMb: value } } }) as unknown as OpenClawConfig;

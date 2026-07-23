@@ -43,7 +43,11 @@ import {
 } from "./gateway-runtime.js";
 import { collectSynologyChatSecurityAuditFindings } from "./security-audit.js";
 import { buildSynologyChatOutboundSessionKey } from "./session-key.js";
-import { synologyChatSetupAdapter, synologyChatSetupWizard } from "./setup-surface.js";
+import {
+  synologyChatSetupAdapter,
+  synologyChatSetupContract,
+  synologyChatSetupWizard,
+} from "./setup-surface.js";
 import type { ResolvedSynologyChatAccount } from "./types.js";
 
 const CHANNEL_ID = "synology-chat";
@@ -285,7 +289,7 @@ async function sendSynologyChatMedia(
   });
 }
 
-export const synologyChatMessageAdapter = defineChannelMessageAdapter({
+const synologyChatMessageAdapter = defineChannelMessageAdapter({
   id: CHANNEL_ID,
   durableFinal: {
     capabilities: {
@@ -300,7 +304,7 @@ export const synologyChatMessageAdapter = defineChannelMessageAdapter({
   },
 });
 
-export function createSynologyChatPlugin(): SynologyChatPlugin {
+function createSynologyChatPlugin(): SynologyChatPlugin {
   return createChatChannelPlugin({
     base: {
       id: CHANNEL_ID,
@@ -327,6 +331,7 @@ export function createSynologyChatPlugin(): SynologyChatPlugin {
       reload: { configPrefixes: [`channels.${CHANNEL_ID}`] },
       configSchema: SynologyChatChannelConfigSchema,
       setup: synologyChatSetupAdapter,
+      setupContract: synologyChatSetupContract,
       setupWizard: synologyChatSetupWizard,
       config: {
         ...synologyChatConfigAdapter,
@@ -373,16 +378,22 @@ export function createSynologyChatPlugin(): SynologyChatPlugin {
           log?.info?.(
             `Starting Synology Chat channel (account: ${accountId}, path: ${account.webhookPath})`,
           );
-          const unregister = registerSynologyWebhookRoute({ cfg, account, accountId, log });
+          const cleanup = await registerSynologyWebhookRoute({
+            cfg,
+            account,
+            accountId,
+            log,
+            abortSignal,
+          });
 
           log?.info?.(`Registered HTTP route: ${account.webhookPath} for Synology Chat`);
 
           // Keep alive until abort signal fires.
           // The gateway expects a Promise that stays pending while the channel is running.
           // Resolving immediately triggers a restart loop.
-          return waitUntilAbort(abortSignal, () => {
+          return waitUntilAbort(abortSignal, async () => {
             log?.info?.(`Stopping Synology Chat channel (account: ${accountId})`);
-            unregister();
+            await cleanup();
           });
         },
 

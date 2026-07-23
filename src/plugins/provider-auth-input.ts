@@ -4,6 +4,7 @@ import {
   normalizeOptionalLowercaseString,
   normalizeStringifiedOptionalString,
 } from "@openclaw/normalization-core/string-coerce";
+import { sliceUtf16Safe } from "@openclaw/normalization-core/utf16-slice";
 import { isMalformedApiKeyInput } from "../agents/auth-profiles/credential-state.js";
 import { resolveEnvApiKey } from "../agents/model-auth-env.js";
 import type { OpenClawConfig } from "../config/types.js";
@@ -18,16 +19,8 @@ import {
 } from "./provider-auth-ref.js";
 import type { SecretInputMode } from "./provider-auth-types.js";
 
-export {
-  extractEnvVarFromSourceLabel,
-  promptSecretRefForSetup,
-  resolveRefFallbackInput,
-  type SecretRefSetupPromptCopy,
-} from "./provider-auth-ref.js";
-export {
-  resolveSecretInputModeForEnvSelection,
-  type SecretInputModePromptCopy,
-} from "./provider-auth-mode.js";
+export { promptSecretRefForSetup } from "./provider-auth-ref.js";
+export { resolveSecretInputModeForEnvSelection } from "./provider-auth-mode.js";
 
 const DEFAULT_KEY_PREVIEW = { head: 4, tail: 4 };
 
@@ -85,11 +78,11 @@ export function formatApiKeyPreview(
     const shortHead = Math.min(2, trimmed.length);
     const shortTail = Math.min(2, trimmed.length - shortHead);
     if (shortTail <= 0) {
-      return `${trimmed.slice(0, shortHead)}…`;
+      return `${sliceUtf16Safe(trimmed, 0, shortHead)}…`;
     }
-    return `${trimmed.slice(0, shortHead)}…${trimmed.slice(-shortTail)}`;
+    return `${sliceUtf16Safe(trimmed, 0, shortHead)}…${sliceUtf16Safe(trimmed, -shortTail)}`;
   }
-  return `${trimmed.slice(0, head)}…${trimmed.slice(-tail)}`;
+  return `${sliceUtf16Safe(trimmed, 0, head)}…${sliceUtf16Safe(trimmed, -tail)}`;
 }
 
 /** Normalizes a token-provider selector from CLI/options input. */
@@ -111,7 +104,7 @@ export function normalizeSecretInputModeInput(
 }
 
 /** Applies a CLI-provided API key when its provider selector matches this auth method. */
-export async function maybeApplyApiKeyFromOption(params: {
+async function maybeApplyApiKeyFromOption(params: {
   token: string | undefined;
   tokenProvider: string | undefined;
   secretInputMode?: SecretInputMode;

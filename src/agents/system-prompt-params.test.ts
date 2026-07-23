@@ -5,10 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { OpenClawConfig } from "../config/config.js";
-import {
-  resetActiveNodeContextForTests,
-  setActiveNodeContext,
-} from "../infra/active-node-context.js";
+import { setActiveNodeContext } from "../infra/active-node-context.js";
 import { buildSystemPromptParams } from "./system-prompt-params.js";
 
 async function makeTempDir(label: string): Promise<string> {
@@ -35,7 +32,7 @@ function buildParams(params: { config?: OpenClawConfig; workspaceDir?: string; c
 }
 
 describe("buildSystemPromptParams", () => {
-  afterEach(() => resetActiveNodeContextForTests());
+  afterEach(() => setActiveNodeContext(null));
 
   it("projects only the stable active-node identity", () => {
     setActiveNodeContext({ nodeId: "mac-123" });
@@ -43,6 +40,17 @@ describe("buildSystemPromptParams", () => {
     const { runtimeInfo } = buildParams({});
 
     expect(runtimeInfo.activeNode).toBe("mac-123");
+  });
+
+  it("omits an active node that fails current-generation validation", () => {
+    setActiveNodeContext(
+      { nodeId: "mac-123", pairingGeneration: "generation-a" },
+      { isCurrent: () => false },
+    );
+
+    const { runtimeInfo } = buildParams({});
+
+    expect(runtimeInfo.activeNode).toBeUndefined();
   });
 
   it("detects repo root from workspaceDir", async () => {

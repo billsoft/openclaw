@@ -24,6 +24,7 @@ describe("command-startup-policy", () => {
     expect(shouldBypassConfigGuardForCommandPath(["config"])).toBe(true);
     expect(shouldBypassConfigGuardForCommandPath(["config", "validate"])).toBe(true);
     expect(shouldBypassConfigGuardForCommandPath(["config", "schema"])).toBe(true);
+    expect(shouldBypassConfigGuardForCommandPath(["docs"])).toBe(true);
     expect(shouldBypassConfigGuardForCommandPath(["config", "set"])).toBe(false);
     expect(shouldBypassConfigGuardForCommandPath(["status"])).toBe(false);
   });
@@ -243,6 +244,15 @@ describe("command-startup-policy", () => {
   it("reserves stdout for the node worker protocol", () => {
     const policy = resolvePolicy({ commandPath: ["node", "worker"] });
 
+    expect(policy.hideBanner).toBe(true);
+    expect(policy.loadPlugins).toBe(false);
+    expect(policy.suppressDoctorStdout).toBe(true);
+  });
+
+  it("isolates cloud worker startup", () => {
+    const policy = resolvePolicy({ commandPath: ["worker"] });
+
+    expect(shouldBypassConfigGuardForCommandPath(["worker"])).toBe(true);
     expect(policy.hideBanner).toBe(true);
     expect(policy.loadPlugins).toBe(false);
     expect(policy.suppressDoctorStdout).toBe(true);

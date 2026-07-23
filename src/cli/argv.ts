@@ -1,4 +1,5 @@
 // Low-level CLI argv helpers for root options, help/version detection, and command paths.
+import { isExperimentalClawsEnabled } from "../claws/experimental.js";
 import { isBunRuntime, isNodeRuntime } from "../daemon/runtime-binary.js";
 import {
   consumeRootOptionToken,
@@ -12,7 +13,12 @@ import { SUB_CLI_DESCRIPTORS } from "./program/subcli-descriptors.js";
 const HELP_FLAGS = new Set(["-h", "--help"]);
 const VERSION_FLAGS = new Set(["-V", "--version"]);
 const ROOT_VERSION_ALIAS_FLAG = "-v";
-const ROOT_COMMAND_DESCRIPTORS = [...CORE_CLI_COMMAND_DESCRIPTORS, ...SUB_CLI_DESCRIPTORS];
+const ROOT_COMMAND_DESCRIPTORS = [
+  ...CORE_CLI_COMMAND_DESCRIPTORS.filter(
+    (descriptor) => descriptor.name !== "claws" || isExperimentalClawsEnabled(),
+  ),
+  ...SUB_CLI_DESCRIPTORS,
+];
 const KNOWN_ROOT_COMMANDS: ReadonlySet<string> = new Set(
   ROOT_COMMAND_DESCRIPTORS.map((descriptor) => descriptor.name),
 );
@@ -21,12 +27,6 @@ const ROOT_COMMANDS_WITH_SUBCOMMANDS: ReadonlySet<string> = new Set(
     (descriptor) => descriptor.name,
   ),
 );
-
-export function hasHelpOrVersion(argv: string[]): boolean {
-  return (
-    argv.some((arg) => HELP_FLAGS.has(arg) || VERSION_FLAGS.has(arg)) || hasRootVersionAlias(argv)
-  );
-}
 
 export function isHelpOrVersionInvocation(argv: string[]): boolean {
   if (hasRootVersionAlias(argv)) {
@@ -265,14 +265,14 @@ export function normalizeRootHelpTargetArgv(argv: string[]): string[] {
   return [runtimePath, entryPath, ...rootOptions, ...targetPath, "--help"];
 }
 
-export type NormalizeRootNoColorArgvOptions = {
+type NormalizeRootNoColorArgvOptions = {
   shouldPreserveNoColor?: (params: {
     remainingArgs: readonly string[];
     noColorIndex: number;
   }) => boolean;
 };
 
-export type NormalizeRootLogLevelArgvOptions = {
+type NormalizeRootLogLevelArgvOptions = {
   shouldPreserveLogLevel?: (params: {
     remainingArgs: readonly string[];
     logLevelIndex: number;
@@ -590,31 +590,20 @@ export function getCommandPositionalsWithRootOptions(
   return positionals;
 }
 
-export function buildParseArgv(params: {
-  programName?: string;
-  rawArgs?: string[];
-  fallbackArgv?: string[];
-}): string[] {
-  const baseArgv =
-    params.rawArgs && params.rawArgs.length > 0
-      ? params.rawArgs
-      : params.fallbackArgv && params.fallbackArgv.length > 0
-        ? params.fallbackArgv
-        : process.argv;
-  const programName = params.programName ?? "";
+export function buildParseArgv(rawArgs: string[], programName = "openclaw"): string[] {
   const normalizedArgv =
-    programName && baseArgv[0] === programName
-      ? baseArgv.slice(1)
-      : baseArgv[0]?.endsWith("openclaw")
-        ? baseArgv.slice(1)
-        : baseArgv;
+    rawArgs[0] === programName
+      ? rawArgs.slice(1)
+      : rawArgs[0]?.endsWith("openclaw")
+        ? rawArgs.slice(1)
+        : rawArgs;
   const looksLikeNode =
     normalizedArgv.length >= 2 &&
     (isNodeRuntime(normalizedArgv[0] ?? "") || isBunRuntime(normalizedArgv[0] ?? ""));
   if (looksLikeNode) {
     return normalizedArgv;
   }
-  return ["node", programName || "openclaw", ...normalizedArgv];
+  return ["node", programName, ...normalizedArgv];
 }
 
 export function shouldMigrateStateFromPath(path: string[]): boolean {

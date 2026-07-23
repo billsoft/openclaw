@@ -36,12 +36,6 @@ type ChannelHealthTimingPolicy = {
 type ChannelHealthMonitorDeps = {
   channelManager: ChannelManager;
   checkIntervalMs?: number;
-  /** @deprecated use timing.monitorStartupGraceMs */
-  startupGraceMs?: number;
-  /** @deprecated use timing.channelConnectGraceMs */
-  channelStartupGraceMs?: number;
-  /** @deprecated use timing.staleEventThresholdMs */
-  staleEventThresholdMs?: number;
   timing?: Partial<ChannelHealthTimingPolicy>;
   cooldownCycles?: number;
   maxRestartsPerHour?: number;
@@ -60,22 +54,13 @@ type RestartRecord = {
 };
 
 function resolveTimingPolicy(
-  deps: Pick<
-    ChannelHealthMonitorDeps,
-    "startupGraceMs" | "channelStartupGraceMs" | "staleEventThresholdMs" | "timing"
-  >,
+  deps: Pick<ChannelHealthMonitorDeps, "timing">,
 ): ChannelHealthTimingPolicy {
   return {
-    monitorStartupGraceMs:
-      deps.timing?.monitorStartupGraceMs ?? deps.startupGraceMs ?? DEFAULT_MONITOR_STARTUP_GRACE_MS,
-    channelConnectGraceMs:
-      deps.timing?.channelConnectGraceMs ??
-      deps.channelStartupGraceMs ??
-      DEFAULT_CHANNEL_CONNECT_GRACE_MS,
+    monitorStartupGraceMs: deps.timing?.monitorStartupGraceMs ?? DEFAULT_MONITOR_STARTUP_GRACE_MS,
+    channelConnectGraceMs: deps.timing?.channelConnectGraceMs ?? DEFAULT_CHANNEL_CONNECT_GRACE_MS,
     staleEventThresholdMs:
-      deps.timing?.staleEventThresholdMs ??
-      deps.staleEventThresholdMs ??
-      DEFAULT_CHANNEL_STALE_EVENT_THRESHOLD_MS,
+      deps.timing?.staleEventThresholdMs ?? DEFAULT_CHANNEL_STALE_EVENT_THRESHOLD_MS,
   };
 }
 
@@ -113,15 +98,15 @@ export function startChannelHealthMonitor(deps: ChannelHealthMonitorDeps): Chann
       }
 
       const snapshot = channelManager.getRuntimeSnapshot();
-      const autostartSuppression = channelManager.getAutostartSuppression();
-      if (!autostartSuppression) {
-        suppressedAccounts.clear();
-      }
+      const globalAutostartSuppression = channelManager.getAutostartSuppression();
 
       for (const [channelId, accounts] of Object.entries(snapshot.channelAccounts)) {
         if (!accounts) {
           continue;
         }
+        const autostartSuppressed =
+          globalAutostartSuppression !== null ||
+          channelManager.isAmbientAutostartSuppressed(channelId);
         for (const [accountId, status] of Object.entries(accounts)) {
           // A replacement monitor owns future accounts. The retired monitor may
           // only finish the restart it had already begun.
@@ -138,7 +123,7 @@ export function startChannelHealthMonitor(deps: ChannelHealthMonitorDeps): Chann
             continue;
           }
           const key = rKey(channelId, accountId);
-          if (autostartSuppression) {
+          if (autostartSuppressed) {
             if (status.running !== true && !suppressedAccounts.has(key)) {
               log.info?.(
                 `[${channelId}:${accountId}] health-monitor: channel autostart suppressed; treating as expected stopped`,

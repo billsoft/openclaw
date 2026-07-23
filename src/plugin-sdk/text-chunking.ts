@@ -1,12 +1,28 @@
 // Text chunking helpers split long outbound text while preserving readable line boundaries.
-import { chunkTextByBreakResolver } from "../shared/text-chunking.js";
+import { chunkTextByBreakResolver, splitLongTextLine } from "../shared/text-chunking.js";
+
+/** Offset-preserving text ranges for transports with native style metadata. */
+export {
+  chunkTextRanges,
+  type ChunkTextRangesOptions,
+  type TextChunkRange,
+} from "../../packages/markdown-core/src/chunk-text.js";
+/** Quote-aware HTML tag tokens for exact post-render projections. */
+export { tokenizeHtmlTags } from "../../packages/markdown-core/src/html-tags.js";
 
 /**
  * Splits outbound channel text into chunks no longer than the requested limit.
  * Newline boundaries win over spaces; text without usable separators falls back
  * to a hard character split so channel senders always receive bounded strings.
  */
-export function chunkTextForOutbound(text: string, limit: number): string[] {
+export function chunkTextForOutbound(
+  text: string,
+  limit: number,
+  options?: { preserveWhitespace?: boolean; formatting?: unknown },
+): string[] {
+  if (options?.preserveWhitespace !== undefined) {
+    return splitLongTextLine(text, limit, { preserveWhitespace: options.preserveWhitespace });
+  }
   return chunkTextByBreakResolver(text, limit, (window) => {
     const lastNewline = window.lastIndexOf("\n");
     const lastSpace = window.lastIndexOf(" ");

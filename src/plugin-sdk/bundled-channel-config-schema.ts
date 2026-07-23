@@ -8,10 +8,13 @@
  */
 export {
   AllowFromListSchema,
+  ChannelGroupEntrySchema,
   BlockStreamingCoalesceSchema,
   buildCatchallMultiAccountChannelSchema,
   buildChannelConfigSchema,
   buildNestedDmConfigSchema,
+  buildGroupEntrySchema,
+  buildMultiAccountChannelSchema,
   ContextVisibilityModeSchema,
   DmConfigSchema,
   DmPolicySchema,
@@ -22,13 +25,6 @@ export {
   requireOpenAllowFrom,
   ToolPolicySchema,
 } from "./channel-config-schema.js";
-export {
-  DiscordConfigSchema,
-  IMessageConfigSchema,
-  MSTeamsConfigSchema,
-  SignalConfigSchema,
-  SlackConfigSchema,
-  TelegramConfigSchema,
-} from "../config/zod-schema.providers-core.js";
+export { IMessageConfigSchema, TelegramConfigSchema } from "../config/zod-schema.providers-core.js";
 export { GoogleChatConfigSchema } from "../config/zod-schema.providers-googlechat.js";
 export { WhatsAppConfigSchema } from "../config/zod-schema.providers-whatsapp.js";

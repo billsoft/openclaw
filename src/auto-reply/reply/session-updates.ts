@@ -15,6 +15,7 @@ import {
 } from "../../gateway/active-sessions-shutdown-tracker.js";
 import { resolveStableSessionEndTranscript } from "../../gateway/session-transcript-files.fs.js";
 import { logVerbose } from "../../globals.js";
+import { isFastTestRuntimeEnv } from "../../infra/env.js";
 import { getGlobalHookRunner } from "../../plugins/hook-runner-global.js";
 import { runWithGatewayIndependentRootWorkContinuation } from "../../process/gateway-work-admission.js";
 import { resolveAgentIdFromSessionKey } from "../../routing/session-key.js";
@@ -22,8 +23,6 @@ import { getRemoteSkillEligibility } from "../../skills/runtime/remote.js";
 import { resolveReusableWorkspaceSkillSnapshot } from "../../skills/runtime/session-snapshot.js";
 import type { ReplySessionEntryHandle } from "./session-entry-handle.js";
 import { buildSessionEndHookPayload, buildSessionStartHookPayload } from "./session-hooks.js";
-export { drainFormattedSystemEvents } from "./session-system-events.js";
-export { resetResolvedSkillsCacheForTests } from "../../skills/runtime/session-snapshot.js";
 
 async function persistSessionEntryUpdate(params: {
   expectedSessionId: string | undefined;
@@ -158,7 +157,7 @@ export async function ensureSkillSnapshot(params: {
   skillsSnapshot?: SessionEntry["skillsSnapshot"];
   systemSent: boolean;
 }> {
-  if (process.env.OPENCLAW_TEST_FAST === "1") {
+  if (isFastTestRuntimeEnv()) {
     // In fast unit-test runs we skip filesystem scanning, watchers, and session-store writes.
     // Dedicated skills tests cover snapshot generation behavior.
     return {

@@ -1,13 +1,6 @@
 // Regresses allowlist config requiring explicit allowFrom entries.
 import { describe, expect, it } from "vitest";
-import {
-  DiscordConfigSchema,
-  IMessageConfigSchema,
-  IrcConfigSchema,
-  SignalConfigSchema,
-  SlackConfigSchema,
-  TelegramConfigSchema,
-} from "./zod-schema.providers-core.js";
+import { IMessageConfigSchema, TelegramConfigSchema } from "./zod-schema.providers-core.js";
 import { WhatsAppConfigSchema } from "./zod-schema.providers-whatsapp.js";
 
 function expectSchemaAllowlistIssue(
@@ -40,18 +33,6 @@ describe('dmPolicy="allowlist" requires non-empty effective allowFrom', () => {
       issuePath: "allowFrom",
     },
     {
-      name: "signal",
-      schema: SignalConfigSchema,
-      config: { dmPolicy: "allowlist" },
-      issuePath: "allowFrom",
-    },
-    {
-      name: "discord",
-      schema: DiscordConfigSchema,
-      config: { dmPolicy: "allowlist" },
-      issuePath: "allowFrom",
-    },
-    {
       name: "whatsapp",
       schema: WhatsAppConfigSchema,
       config: { dmPolicy: "allowlist" },
@@ -81,28 +62,6 @@ describe('account dmPolicy="allowlist" uses inherited allowFrom', () => {
       },
     },
     {
-      name: "signal",
-      schema: SignalConfigSchema,
-      config: { allowFrom: ["+15550001111"], accounts: { work: { dmPolicy: "allowlist" } } },
-    },
-    {
-      name: "discord",
-      schema: DiscordConfigSchema,
-      config: { allowFrom: ["123456789"], accounts: { work: { dmPolicy: "allowlist" } } },
-    },
-    {
-      name: "slack",
-      schema: SlackConfigSchema,
-      config: {
-        allowFrom: ["U123"],
-        botToken: "xoxb-top",
-        appToken: "xapp-top",
-        accounts: {
-          work: { dmPolicy: "allowlist", botToken: "xoxb-work", appToken: "xapp-work" },
-        },
-      },
-    },
-    {
       name: "whatsapp",
       schema: WhatsAppConfigSchema,
       config: { allowFrom: ["+15550001111"], accounts: { work: { dmPolicy: "allowlist" } } },
@@ -111,11 +70,6 @@ describe('account dmPolicy="allowlist" uses inherited allowFrom', () => {
       name: "imessage",
       schema: IMessageConfigSchema,
       config: { allowFrom: ["alice"], accounts: { work: { dmPolicy: "allowlist" } } },
-    },
-    {
-      name: "irc",
-      schema: IrcConfigSchema,
-      config: { allowFrom: ["nick"], accounts: { work: { dmPolicy: "allowlist" } } },
     },
   ] as const)(
     "accepts $name account allowlist when parent allowFrom exists",
@@ -130,70 +84,5 @@ describe('account dmPolicy="allowlist" uses inherited allowFrom', () => {
       { accounts: { bot1: { dmPolicy: "allowlist", botToken: "fake" } } },
       "allowFrom",
     );
-  });
-});
-
-describe("signal reply-to config", () => {
-  it("accepts channel and account scoped reply-to modes", () => {
-    const result = SignalConfigSchema.safeParse({
-      replyToMode: "first",
-      replyToModeByChatType: { direct: "all", group: "first" },
-      accounts: {
-        work: {
-          replyToMode: "off",
-          replyToModeByChatType: { direct: "first", group: "off" },
-        },
-      },
-    });
-
-    expect(result.success).toBe(true);
-  });
-
-  it("rejects unreachable Signal channel reply-to overrides", () => {
-    const result = SignalConfigSchema.safeParse({
-      replyToModeByChatType: { channel: "off" },
-    });
-
-    expect(result.success).toBe(false);
-  });
-
-  it("rejects unreachable Signal account reply-to overrides", () => {
-    const result = SignalConfigSchema.safeParse({
-      accounts: {
-        work: {
-          replyToModeByChatType: { channel: "off" },
-        },
-      },
-    });
-
-    expect(result.success).toBe(false);
-  });
-});
-
-describe("Discord mentionAliases schema", () => {
-  it("accepts stable outbound mention aliases on top-level and account config", () => {
-    expect(
-      DiscordConfigSchema.safeParse({
-        mentionAliases: {
-          opslead: "123456789012345678",
-        },
-        accounts: {
-          work: {
-            mentionAliases: {
-              vladislava: "234567890123456789",
-            },
-          },
-        },
-      }).success,
-    ).toBe(true);
-  });
-
-  it("rejects non-snowflake mention alias targets", () => {
-    const result = DiscordConfigSchema.safeParse({
-      mentionAliases: {
-        opslead: "not-a-user-id",
-      },
-    });
-    expect(result.success).toBe(false);
   });
 });
