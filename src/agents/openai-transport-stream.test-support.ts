@@ -10,4 +10,4 @@ if (!completionsTesting || !responsesTesting) {
 export const testing = {
   ...responsesTesting,
   ...completionsTesting,
-};
+} as Record<string, unknown>;

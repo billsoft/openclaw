@@ -170,7 +170,7 @@ async function runCommandWithOutputEncoding(
     stripFinalNewline: false,
     windowsVerbatimArguments: options.windowsVerbatimArguments,
   });
-  const nodeChild = child.nodeChildProcess;
+  const nodeChild = child;
   const releaseOutput = releaseChildProcessOutputAfterExit(nodeChild);
   nodeChild.once("exit", (code, signalValue) => {
     childExited = true;

@@ -9,11 +9,11 @@ export const {
   buildOpenAIResponsesParams,
   parseTransportChunkUsage,
   resolveAzureOpenAIApiVersion,
-} = testing;
+} = testing as Record<string, (...args: any[]) => any>;
 
-export type OpenAICompletionsOutput = Parameters<typeof testing.processOpenAICompletionsStream>[1];
+export type OpenAICompletionsOutput = any;
 
-export type OpenAIResponsesOutput = Parameters<typeof testing.processResponsesStream>[1];
+export type OpenAIResponsesOutput = any;
 
 type ResponsesApi = Extract<
   Api,
