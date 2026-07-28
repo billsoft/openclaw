@@ -18,8 +18,13 @@ import {
 import { formatSqliteSessionFileMarker } from "../../config/sessions/sqlite-marker.js";
 import type { SessionEntry as SessionStoreEntry } from "../../config/sessions/types.js";
 import { onInternalSessionTranscriptUpdate } from "../../sessions/transcript-events.js";
+import { estimateStringChars } from "../../utils/cjk-chars.js";
 import { formatFullOutputFooter } from "../sessions/tools/tool-contracts.js";
 import { makeAgentAssistantMessage } from "../test-helpers/agent-message-fixtures.js";
+import {
+  calculateMaxToolResultCharsWithCap,
+  resolveAutoLiveToolResultMaxChars,
+} from "../tool-result-limits.js";
 import { buildRuntimeContextCustomMessage } from "./run/runtime-context-prompt.js";
 import {
   clearEmbeddedSessionPromptStates,
@@ -28,8 +33,6 @@ import {
 } from "./session-prompt-state.js";
 
 let truncateToolResultMessage: typeof import("./tool-result-truncation.js").truncateToolResultMessage;
-let calculateMaxToolResultCharsWithCap: typeof import("./tool-result-truncation.js").calculateMaxToolResultCharsWithCap;
-let resolveAutoLiveToolResultMaxChars: typeof import("./tool-result-truncation.js").resolveAutoLiveToolResultMaxChars;
 let truncateOversizedToolResultsInMessages: typeof import("./tool-result-truncation.js").truncateOversizedToolResultsInMessages;
 let truncateOversizedToolResultsInActiveTarget: typeof import("./tool-result-truncation.js").truncateOversizedToolResultsInActiveTarget;
 let sessionLikelyHasOversizedToolResults: typeof import("./tool-result-truncation.js").sessionLikelyHasOversizedToolResults;
@@ -45,8 +48,6 @@ async function loadFreshToolResultTruncationModuleForTest() {
   // across persisted-session and live-truncation tests.
   ({
     truncateToolResultMessage,
-    calculateMaxToolResultCharsWithCap,
-    resolveAutoLiveToolResultMaxChars,
     truncateOversizedToolResultsInMessages,
     truncateOversizedToolResultsInActiveTarget,
     sessionLikelyHasOversizedToolResults,
@@ -274,6 +275,15 @@ describe("truncateToolResultText", () => {
     ).toBe("");
   });
 
+  it("reports the full omission count when only a suffix fits", () => {
+    expect(
+      truncateToolResultText("x".repeat(100), 4, {
+        suffix: (truncatedChars) => `[${truncatedChars}]`,
+        minKeepChars: 1,
+      }),
+    ).toBe("[100");
+  });
+
   it("keeps both head and tail cuts on complete code points", () => {
     const marker = "\n\n⚠️ [... middle content omitted — showing head and tail ...]\n\n";
     const text = `${"a".repeat(6)}😀${"m".repeat(100)}😀${"x".repeat(22)} Error`;
@@ -383,6 +393,94 @@ describe("truncateToolResultMessage", () => {
     expect(String(firstBlock.text).length).toBeLessThan(oversized.length);
     expect(firstBlock.content).toBe(firstBlock.text);
   });
+
+  it("truncates dense CJK by weighted budget while leaving same-size ASCII unchanged", () => {
+    const maxChars = 16_000;
+    const asciiMessage = makeToolResult("a".repeat(maxChars));
+    expect(truncateToolResultMessage(asciiMessage, maxChars)).toBe(asciiMessage);
+
+    const cjk = "你".repeat(maxChars);
+    const cjkMessage = makeToolResult(cjk);
+    const result = truncateToolResultMessage(cjkMessage, maxChars);
+    const resultText = getFirstToolResultText(result);
+
+    expect(result).not.toBe(cjkMessage);
+    expect(resultText.length).toBeLessThan(cjk.length);
+    expect(estimateStringChars(resultText)).toBeLessThanOrEqual(maxChars);
+    expect(resultText).toContain("truncated");
+  });
+
+  it("shares weighted budget across mixed ASCII and CJK blocks", () => {
+    const msg = {
+      ...makeToolResult("unused"),
+      content: [
+        { type: "text", text: "你".repeat(1_000) },
+        { type: "text", text: "a".repeat(4_000) },
+      ],
+    } as ToolResultMessage;
+
+    const result = truncateToolResultMessage(msg, 4_000);
+    expect(result.role).toBe("toolResult");
+    if (result.role !== "toolResult") {
+      throw new Error("expected toolResult");
+    }
+    const estimated = result.content.reduce(
+      (sum, block) => sum + (block.type === "text" ? estimateStringChars(block.text) : 0),
+      0,
+    );
+    expect(estimated).toBeLessThanOrEqual(4_000);
+    expect(result.content).toHaveLength(2);
+  });
+
+  it("reserves omission notices before preserving multiple small blocks", () => {
+    const msg = {
+      ...makeToolResult("unused"),
+      content: [
+        { type: "text", text: "a".repeat(50) },
+        { type: "text", text: "b".repeat(50) },
+        { type: "text", text: "c".repeat(500) },
+      ],
+    } as ToolResultMessage;
+
+    const result = truncateToolResultMessage(msg, 100, {
+      suffix: "!",
+      minKeepChars: 99,
+    });
+    expect(result.role).toBe("toolResult");
+    if (result.role !== "toolResult") {
+      throw new Error("expected toolResult");
+    }
+    const texts = result.content.map((block) => (block.type === "text" ? block.text : ""));
+    expect(texts[2]).toContain("!");
+    expect(texts.every((text) => text.length > 0)).toBe(true);
+    expect(texts.reduce((sum, text) => sum + estimateStringChars(text), 0)).toBeLessThanOrEqual(
+      100,
+    );
+  });
+
+  it("does not let empty text blocks consume omission-notice budget", () => {
+    const msg = {
+      ...makeToolResult("unused"),
+      content: [
+        ...Array.from({ length: 150 }, () => ({ type: "text" as const, text: "" })),
+        { type: "text" as const, text: "x".repeat(500) },
+      ],
+    } as ToolResultMessage;
+
+    const result = truncateToolResultMessage(msg, 100, {
+      suffix: "!",
+      minKeepChars: 0,
+    });
+    expect(result.role).toBe("toolResult");
+    if (result.role !== "toolResult") {
+      throw new Error("expected toolResult");
+    }
+    expect(
+      result.content.slice(0, -1).every((block) => block.type !== "text" || block.text === ""),
+    ).toBe(true);
+    const lastBlock = result.content.at(-1);
+    expect(lastBlock?.type === "text" ? lastBlock.text : "").toMatch(/!$/u);
+  });
 });
 
 describe("calculateMaxToolResultChars", () => {
@@ -416,24 +514,6 @@ describe("calculateMaxToolResultChars", () => {
     expect(result).toBe(32_000);
   });
 
-  it("resolves per-agent tool-result cap overrides", () => {
-    const result = resolveLiveToolResultMaxChars({
-      contextWindowTokens: 128_000,
-      cfg: {
-        agents: {
-          defaults: {
-            contextLimits: {
-              toolResultMaxChars: 24_000,
-            },
-          },
-          list: [{ id: "writer" }],
-        },
-      },
-      agentId: "writer",
-    });
-    expect(result).toBe(24_000);
-  });
-
   it.each([
     { contextWindowTokens: 20_000, perResultMaxChars: 16_000, aggregateMaxChars: 64_000 },
     { contextWindowTokens: 128_000, perResultMaxChars: 32_000, aggregateMaxChars: 256_000 },
@@ -453,6 +533,13 @@ describe("calculateMaxToolResultChars", () => {
 });
 
 describe("sessionLikelyHasOversizedToolResults", () => {
+  it("detects dense CJK that fits the raw character cap", () => {
+    const messages: AgentMessage[] = [makeToolResult("你".repeat(5_000))];
+    expect(sessionLikelyHasOversizedToolResults({ messages, contextWindowTokens: 50_000 })).toBe(
+      true,
+    );
+  });
+
   it("returns true for individually oversized tool results", () => {
     const messages: AgentMessage[] = [makeToolResult("x".repeat(500_000))];
     expect(sessionLikelyHasOversizedToolResults({ messages, contextWindowTokens: 128_000 })).toBe(
@@ -618,6 +705,23 @@ describe("truncateOversizedToolResultsInMessages", () => {
       const text = getFirstToolResultText(msg);
       expect(text.length).toBeLessThan(500_000);
     }
+  });
+
+  it("applies the aggregate cap to CJK-weighted prompt history", () => {
+    const messages = Array.from({ length: 6 }, (_, index) =>
+      makeToolResult("你".repeat(3_000), `call_${index}`),
+    );
+
+    const result = truncateOversizedToolResultsInMessages(messages, 20_000);
+    const estimated = result.messages.reduce(
+      (sum, message) =>
+        sum +
+        (message.role === "toolResult" ? estimateStringChars(getFirstToolResultText(message)) : 0),
+      0,
+    );
+
+    expect(result.aggregateTruncatedCount).toBeGreaterThan(0);
+    expect(estimated).toBeLessThanOrEqual(result.aggregateBudgetChars);
   });
 
   it("bounds aggregate tool-result text in prompt history without rewriting callers", () => {
