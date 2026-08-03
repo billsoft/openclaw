@@ -33,9 +33,10 @@ export async function runWriteConfigHealth(
   const { replaceConfigFile } = await import("../config/config.js");
   const { logConfigUpdated } = await import("../config/logging.js");
   const { shortenHomePath } = await import("../utils.js");
+  const configResultWritePending =
+    ctx.configResult.shouldWriteConfig === true && ctx.configResultWriteCommitted !== true;
   const shouldWriteConfig =
-    (ctx.configResult.shouldWriteConfig && ctx.configResultWriteCommitted !== true) ||
-    JSON.stringify(ctx.cfg) !== JSON.stringify(ctx.cfgForPersistence);
+    configResultWritePending || JSON.stringify(ctx.cfg) !== JSON.stringify(ctx.cfgForPersistence);
   if (shouldWriteConfig) {
     const updateDoctorRun = isUpdateDoctorRun(ctx.env ?? process.env);
     if (ctx.configResult.skipWizardMetadataForIncludeWrite !== true) {
@@ -58,6 +59,9 @@ export async function runWriteConfigHealth(
         allowConfigSizeDrop: ctx.configResult.shouldWriteConfig === true || updateDoctorRun,
         skipPluginValidation:
           ctx.configResult.skipPluginValidationOnWrite === true || updateDoctorRun,
+        ...(configResultWritePending && ctx.configResult.explicitSetPaths
+          ? { explicitSetPaths: ctx.configResult.explicitSetPaths }
+          : {}),
         preservedLegacyRootKeys: ctx.configResult.preservedLegacyRootKeys,
         ...(legacyParentVersionOverride
           ? { lastTouchedVersionOverride: legacyParentVersionOverride }
@@ -79,8 +83,22 @@ export async function runWriteConfigHealth(
       );
     }
   }
+  if (options.runPostWriteRepairs === false) {
+    return;
+  }
+  if (ctx.configResult.retiredPhoneControlStateCleanupPending === true) {
+    const { finalizeRetiredPhoneControlCleanup } =
+      await import("../commands/doctor-retired-phone-control.js");
+    const { note } = await import("../../packages/terminal-core/src/note.js");
+    const cleanup = await finalizeRetiredPhoneControlCleanup({ env: ctx.env ?? process.env });
+    if (cleanup.changes.length > 0) {
+      note(cleanup.changes.join("\n"), "Doctor changes");
+    }
+    if (cleanup.warnings.length > 0) {
+      note(cleanup.warnings.join("\n"), "Doctor warnings");
+    }
+  }
   if (
-    options.runPostWriteRepairs === false ||
     ctx.configResult.shouldRepairCronCodexModelRefsAfterConfigWrite !== true ||
     ctx.postConfigWriteRepairsCommitted === true
   ) {

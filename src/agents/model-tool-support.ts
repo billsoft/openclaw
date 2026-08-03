@@ -2,31 +2,22 @@
  * Model capability helper for tool-use support.
  *
  * Provider catalogs can opt a model out via `compat.supportsTools === false`;
- * absent metadata remains permissive for older catalog entries. The local
- * enhancement keeps `id`/`provider` on the parameter shape so we can emit
- * `[openclaw:model-tool-support]` diagnostics for production troubleshooting.
+ * absent metadata remains permissive for older catalog entries.
  */
-let lastSupportsToolsWarning: string | undefined;
+const MODEL_TOOLS_UNAVAILABLE_PROMPT =
+  "## Tool availability\n\nThis model cannot use tools in this run. Do not claim that you ran commands, read or wrote files, browsed the web, generated media, or performed any other tool-backed action. If a request requires tools, say they are unavailable in this chat and ask the user to switch to a tool-capable model.";
 
-export function supportsModelTools(model: {
-  compat?: unknown;
-  id?: string;
-  provider?: string;
-}): boolean {
+/** Returns whether a catalog model should be offered tool calls. */
+export function supportsModelTools(model: { compat?: unknown }): boolean {
   const compat =
     model.compat && typeof model.compat === "object"
       ? (model.compat as { supportsTools?: boolean })
       : undefined;
   const supports = compat?.supportsTools !== false;
-
-  if (!supports) {
-    const key = `${model.provider ?? "unknown"}/${model.id ?? "unknown"}`;
-    const msg = `tools disabled: model ${key} has supportsTools=false in compat config`;
-    if (msg !== lastSupportsToolsWarning) {
-      lastSupportsToolsWarning = msg;
-      console.warn(`[openclaw:model-tool-support] ${msg}`);
-    }
-  }
-
   return supports;
+}
+
+/** Builds the bounded honesty guard for models that explicitly disable tools. */
+export function buildModelToolsUnavailablePrompt(modelToolsEnabled: boolean): string | undefined {
+  return modelToolsEnabled ? undefined : MODEL_TOOLS_UNAVAILABLE_PROMPT;
 }

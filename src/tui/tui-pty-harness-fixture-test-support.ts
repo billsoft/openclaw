@@ -2,6 +2,10 @@
 import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
+import { TUI_PTY_ASSISTANT_FIXTURE_SCRIPT } from "./tui-pty-assistant-fixture-test-support.js";
+import { TUI_PTY_GAP_HISTORY_FIXTURE_SCRIPT } from "./tui-pty-gap-fixture-test-support.js";
+import { TUI_PTY_RESET_FIXTURE } from "./tui-pty-reset-fixture-test-support.js";
+import { TUI_PTY_SESSION_SUBSCRIPTION_FIXTURE_SCRIPT } from "./tui-pty-subscription-fixture-test-support.js";
 import { sleep, type PtyRun } from "./tui-pty-test-support.js";
 
 export async function writeTuiPtyFixtureScript(dir: string) {
@@ -20,7 +24,7 @@ export async function writeTuiPtyFixtureScript(dir: string) {
   await writeFile(
     scriptPath,
     `
-      import { appendFileSync } from "node:fs";
+      import { appendFileSync, existsSync } from "node:fs";
       import { buildEmbeddedRunPayloads } from ${JSON.stringify(payloadsModuleUrl)};
       import { getReplyPayloadMetadata } from ${JSON.stringify(replyPayloadModuleUrl)};
       import { normalizeReplyPayloadsForDelivery } from ${JSON.stringify(outboundPayloadsModuleUrl)};
@@ -32,6 +36,8 @@ export async function writeTuiPtyFixtureScript(dir: string) {
       const startupDelayMs = Number(process.env.OPENCLAW_TUI_PTY_STARTUP_DELAY_MS ?? 0);
       const footerModel = process.env.OPENCLAW_TUI_PTY_MODEL;
       const footerThinkingLevel = process.env.OPENCLAW_TUI_PTY_THINKING_LEVEL;
+      let verboseLevel = process.env.OPENCLAW_TUI_PTY_VERBOSE_LEVEL;
+      let modeTargetTraceLevel: string | undefined;
       const launchThinkingLevel = process.env.OPENCLAW_TUI_PTY_LAUNCH_THINKING;
       const initialMessage = process.env.OPENCLAW_TUI_PTY_INITIAL_MESSAGE;
       const enablePickerFixture = process.env.OPENCLAW_TUI_PTY_PICKER_FIXTURE === "1";
@@ -71,49 +77,34 @@ export async function writeTuiPtyFixtureScript(dir: string) {
       }
 
       function sessionEntry(key = "main") {
+        const isModeSource = key.endsWith(":mode-source");
+        const isModeTarget = key.endsWith(":mode-target");
+        const entryFastMode = isModeSource ? true : isModeTarget ? undefined : fastMode;
+        const entryVerboseLevel = isModeSource ? "full" : isModeTarget ? undefined : verboseLevel;
+        const entryTraceLevel = isModeSource ? "raw" : isModeTarget ? modeTargetTraceLevel : undefined;
+        const entryReasoningLevel = isModeSource ? "stream" : undefined;
         return {
           key,
           displayName: "Main",
           model: currentModel,
           modelProvider: "fixture-provider",
           contextTokens: 128,
-          fastMode,
+          ...(entryFastMode !== undefined ? { fastMode: entryFastMode } : {}),
           ...(currentThinkingLevel ? { thinkingLevel: currentThinkingLevel } : {}),
+          ...(entryVerboseLevel ? { verboseLevel: entryVerboseLevel } : {}),
+          ...(entryTraceLevel ? { traceLevel: entryTraceLevel } : {}),
+          ...(entryReasoningLevel ? { reasoningLevel: entryReasoningLevel } : {}),
           thinkingLevels: [],
         };
       }
 
-      function assistantMessageFromSourceReplyPayloads(payloads: ReturnType<typeof buildEmbeddedRunPayloads>) {
-        if (payloads.length === 0) {
-          throw new Error("expected source reply payload");
-        }
-        for (const payload of payloads) {
-          const metadata = getReplyPayloadMetadata(payload);
-          if (!metadata?.sourceReplyTranscriptMirror) {
-            throw new Error("expected source reply transcript mirror metadata");
-          }
-          record("sourceReplyMetadata", metadata.sourceReplyTranscriptMirror);
-        }
-        const normalized = normalizeReplyPayloadsForDelivery(payloads);
-        const content = normalized.flatMap((payload) => {
-          const text = payload.text?.trim();
-          return text ? [{ type: "text", text }] : [];
-        });
-        if (content.length === 0) {
-          throw new Error("expected displayable source reply content");
-        }
-        return {
-          role: "assistant",
-          content,
-          timestamp: Date.now(),
-        };
-      }
+      ${TUI_PTY_GAP_HISTORY_FIXTURE_SCRIPT}
+      ${TUI_PTY_ASSISTANT_FIXTURE_SCRIPT}
 
       class FixtureBackend implements TuiBackend {
         connection = { url: "pty-fixture://local" };
         onEvent?: TuiBackend["onEvent"];
         onConnected?: TuiBackend["onConnected"];
-        onDisconnected?: TuiBackend["onDisconnected"];
         onGap?: TuiBackend["onGap"];
 
         start() {
@@ -124,6 +115,8 @@ export async function writeTuiPtyFixtureScript(dir: string) {
           record("stop");
         }
 
+        ${TUI_PTY_SESSION_SUBSCRIPTION_FIXTURE_SCRIPT}
+
         async sendChat(opts: Parameters<TuiBackend["sendChat"]>[0]) {
           record("sendChat", {
             sessionKey: opts.sessionKey,
@@ -132,6 +125,37 @@ export async function writeTuiPtyFixtureScript(dir: string) {
             thinking: opts.thinking,
           });
           const runId = opts.runId ?? "run-pty-fixture";
+          if (opts.message === "tui error redaction proof") {
+            const escape = String.fromCharCode(27);
+            throw new Error("gateway down", {
+              cause: new Error(escape + "[31mAuthorization: Bearer sk-abcdefghijklmnopqrstuv" + escape + "[0m"),
+            });
+          }
+          if (opts.message === "tool chronology proof") {
+            setTimeout(() => {
+              const emitAssistant = (state, text) => {
+                const message = {
+                  role: "assistant",
+                  content: [{ type: "text", text }],
+                  timestamp: Date.now(),
+                };
+                this.onEvent?.({ event: "chat", payload: { runId, sessionKey: opts.sessionKey, state, message } });
+              };
+              emitAssistant("delta", "PTY_BEFORE_TOOL");
+              const data = {
+                phase: "start",
+                toolCallId: "pty-chronology-tool",
+                name: "read_file",
+                args: { path: "chronology-proof.txt" },
+              };
+              this.onEvent?.({ event: "agent", payload: { runId, sessionKey: opts.sessionKey, stream: "tool", data } });
+              const completeText = "PTY_BEFORE_TOOL\\n\\nPTY_AFTER_TOOL";
+              emitAssistant("delta", completeText);
+              emitAssistant("final", completeText);
+              record("toolChronologyComplete", { runId });
+            }, 0);
+            return { runId };
+          }
           if (opts.message === "/btw picker focus proof") {
             queueMicrotask(() => {
               record("pickerSideResult", { runId, sessionKey: opts.sessionKey });
@@ -220,6 +244,7 @@ export async function writeTuiPtyFixtureScript(dir: string) {
             }, 0);
             return { runId };
           }
+          if (opts.message === "history gap proof") { return beginGapHistoryRecovery(this, runId, opts.sessionKey); }
           if (opts.message === "skill approval proof" || opts.message === "skill approval gap proof") {
             pendingPluginApproval = {
               id: "plugin:skill-pty",
@@ -322,13 +347,14 @@ export async function writeTuiPtyFixtureScript(dir: string) {
                   runId,
                 })
               : [];
+            const attachmentOnlyMessage = buildAttachmentOnlyAssistantMessage(opts.message, runId);
             const message = isSourceReplyProof
               ? assistantMessageFromSourceReplyPayloads(sourceReplyPayloads)
-              : {
+              : (attachmentOnlyMessage ?? {
                   role: "assistant",
                   content: [{ type: "text", text: "PTY_RESPONSE: " + opts.message }],
                   timestamp: Date.now(),
-                };
+                });
             this.onEvent?.({
               event: "chat",
               payload: {
@@ -354,6 +380,8 @@ export async function writeTuiPtyFixtureScript(dir: string) {
         async loadHistory(opts: Parameters<TuiBackend["loadHistory"]>[0]) {
           const sessionKey = opts?.sessionKey ?? "main";
           record("loadHistory", { sessionKey });
+          const gapHistory = loadGapHistory(sessionKey);
+          if (gapHistory) { return gapHistory; }
           const rapidSwitchMarker = sessionKey.endsWith("switch-a")
             ? "A"
             : sessionKey.endsWith("switch-b")
@@ -380,10 +408,12 @@ export async function writeTuiPtyFixtureScript(dir: string) {
               messages: [{ role: "user", content: rapidSwitchMarker + "_HISTORY_MARKER" }],
             };
           }
+          const includeSessionInfo =
+            Boolean(footerModel) || sessionKey.endsWith(":mode-source") || sessionKey.endsWith(":mode-target");
           return {
             messages: [],
             fastMode,
-            ...(footerModel
+            ...(includeSessionInfo
               ? {
                   thinkingLevel: footerThinkingLevel,
                   sessionInfo: sessionEntry(sessionKey),
@@ -433,6 +463,12 @@ export async function writeTuiPtyFixtureScript(dir: string) {
           if (typeof opts.fastMode === "boolean") {
             fastMode = opts.fastMode;
           }
+          if (typeof opts.verboseLevel === "string") {
+            verboseLevel = opts.verboseLevel;
+          }
+          if (typeof opts.traceLevel === "string" && opts.key.endsWith(":mode-target")) {
+            modeTargetTraceLevel = opts.traceLevel;
+          }
           return {
             ok: true,
             path: "",
@@ -451,10 +487,7 @@ export async function writeTuiPtyFixtureScript(dir: string) {
           return { ok: true, key, entry: { ...sessionEntry(key), sessionId: "created-session" } };
         }
 
-        async resetSession(key: string, reason?: "new" | "reset") {
-          record("resetSession", { key, reason });
-          return {};
-        }
+        ${TUI_PTY_RESET_FIXTURE.methods}
 
         async getGatewayStatus() {
           record("getGatewayStatus");
@@ -535,11 +568,12 @@ export async function writeTuiPtyFixtureScript(dir: string) {
             },
             session: { scope: "per-sender", mainKey: "main" },
           },
-          deliver: false,
+          deliver: process.env.OPENCLAW_TUI_PTY_DELIVER === "1",
           thinking: launchThinkingLevel,
           message: initialMessage,
           historyLimit: 5,
           title: "openclaw tui pty fixture",
+          ${TUI_PTY_RESET_FIXTURE.options}
         });
       }
 

@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { GatewayBrowserClient, GatewayEventFrame } from "../../api/gateway.ts";
 import { sessionRefFromPath } from "../../app-session-route-paths.ts";
 import type { ApplicationContext, ApplicationGatewaySnapshot } from "../../app/context.ts";
-import type { TaskStatus, TaskSummary } from "../../lib/tasks/data.ts";
+import type { TaskStatus, TaskSummary } from "../../lib/tasks/task-summary.ts";
 import "./tasks-page.ts";
 
 type TasksPageTestElement = HTMLElement & {
@@ -339,10 +339,12 @@ describe("TasksPage cancellation lifecycle", () => {
     expect(request).toHaveBeenCalledWith(
       "tasks.list",
       expect.objectContaining({ agentId: "writer", status: ["queued", "running"] }),
+      { signal: expect.any(AbortSignal) },
     );
     expect(request).toHaveBeenCalledWith(
       "tasks.list",
       expect.objectContaining({ agentId: "writer", limit: 200 }),
+      { signal: expect.any(AbortSignal) },
     );
   });
 
@@ -359,7 +361,11 @@ describe("TasksPage cancellation lifecycle", () => {
     const page = document.createElement("openclaw-tasks-page") as TasksPageTestElement;
     page.context = createContext(source.gateway);
     document.body.append(page);
-    await vi.waitFor(() => expect(request).toHaveBeenCalledWith("tasks.list", expect.anything()));
+    await vi.waitFor(() =>
+      expect(request).toHaveBeenCalledWith("tasks.list", expect.anything(), {
+        signal: expect.any(AbortSignal),
+      }),
+    );
 
     const cancelling = page.cancelTask("task-1");
     await vi.waitFor(() =>

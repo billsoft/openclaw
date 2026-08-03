@@ -1,7 +1,9 @@
+import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import { truncateUtf16Safe } from "@openclaw/normalization-core/utf16-slice";
 import type { GatewayBrowserClient } from "../../api/gateway.ts";
 import type { GatewaySessionRow } from "../../api/types.ts";
 import {
+  isActiveWorkboardCard,
   isFailedSessionStatus,
   normalizeString,
   replaceCard,
@@ -9,7 +11,7 @@ import {
   workboardCardSessionKey,
 } from "./card-state.ts";
 import { loadWorkboard } from "./loading.ts";
-import { formatError, isRecord } from "./normalization-utils.ts";
+import { formatError } from "./normalization-utils.ts";
 import { normalizeCardPayload } from "./normalization.ts";
 import {
   getWorkboardState,
@@ -106,17 +108,22 @@ function sessionCaptureStatus(session: GatewaySessionRow): WorkboardStatus {
 }
 
 function findCapturedSessionCard(cards: WorkboardCard[], sessionKey: string): WorkboardCard | null {
+  let active: WorkboardCard | undefined;
   let archived: WorkboardCard | undefined;
   for (const card of cards) {
     if (workboardCardSessionKey(card) !== sessionKey) {
       continue;
     }
-    if (!card.metadata?.archivedAt) {
-      return card;
+    if (isActiveWorkboardCard(card)) {
+      if (!active || card.updatedAt > active.updatedAt) {
+        active = card;
+      }
+    } else if (!archived || card.updatedAt > archived.updatedAt) {
+      archived = card;
     }
-    archived ??= card;
   }
-  return archived ?? null;
+  // Dashboard matches the newest active card; an archived match is only a restore candidate.
+  return active ?? archived ?? null;
 }
 
 async function loadSessionCaptureHistory(params: {

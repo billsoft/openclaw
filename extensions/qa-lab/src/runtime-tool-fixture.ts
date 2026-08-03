@@ -1,4 +1,5 @@
 // Qa Lab plugin module implements runtime tool fixture behavior.
+import { realpathSync } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { formatErrorMessage } from "openclaw/plugin-sdk/error-runtime";
@@ -54,6 +55,7 @@ type QaRuntimeToolFixtureTranscriptToolResult = {
   tool?: string;
   text: string;
   failure: boolean;
+  hardFailure: boolean;
   structuredFailure: boolean;
 };
 
@@ -192,7 +194,22 @@ function formatRuntimePatchFailureOutput(request: QaRuntimeToolFixtureRequest): 
   return JSON.stringify({ text, structuredError: request.toolOutputStructuredError === true });
 }
 
-function matchesRuntimePatchInput(input: unknown, operation: "add" | "update"): boolean {
+function canonicalRuntimePatchPath(workspaceDir: string, filePath: string): string {
+  const resolvedPath = path.resolve(workspaceDir, filePath);
+  try {
+    // Native patch paths resolve platform aliases after the target leaf is removed.
+    return path.join(realpathSync.native(path.dirname(resolvedPath)), path.basename(resolvedPath));
+  } catch {
+    return resolvedPath;
+  }
+}
+
+function matchesRuntimePatchInput(
+  input: unknown,
+  operation: "add" | "update",
+  workspaceDir: string,
+  patchWorkingDirectory = workspaceDir,
+): boolean {
   if (typeof input !== "string") {
     return false;
   }
@@ -204,11 +221,17 @@ function matchesRuntimePatchInput(input: unknown, operation: "add" | "update"): 
     return false;
   }
   const fileHeaders = lines.filter((line) => /^\*\*\* (?:Add|Update|Delete) File: /u.test(line));
-  const expectedHeader =
-    operation === "add"
-      ? `*** Add File: ${RUNTIME_PATCH_HAPPY_FILENAME}`
-      : `*** Update File: ../${RUNTIME_PATCH_DENIED_FILENAME}`;
-  if (fileHeaders.length !== 1 || fileHeaders[0] !== expectedHeader) {
+  const expectedHeaderPrefix = operation === "add" ? "*** Add File: " : "*** Update File: ";
+  const expectedPath =
+    operation === "add" ? RUNTIME_PATCH_HAPPY_FILENAME : `../${RUNTIME_PATCH_DENIED_FILENAME}`;
+  if (
+    fileHeaders.length !== 1 ||
+    !fileHeaders[0]?.startsWith(expectedHeaderPrefix) ||
+    canonicalRuntimePatchPath(
+      patchWorkingDirectory,
+      fileHeaders[0].slice(expectedHeaderPrefix.length),
+    ) !== canonicalRuntimePatchPath(workspaceDir, expectedPath)
+  ) {
     return false;
   }
   return operation === "add"
@@ -223,13 +246,33 @@ function matchesRuntimePatchArguments(params: {
   workspaceDir: string;
   operation: "add" | "update";
 }): boolean {
-  if (!isRecord(params.args)) {
+  let args = params.args;
+  if (typeof args === "string") {
+    if (matchesRuntimePatchInput(args, params.operation, params.workspaceDir)) {
+      return true;
+    }
+    try {
+      args = JSON.parse(args) as unknown;
+    } catch {
+      return false;
+    }
+  }
+  if (!isRecord(args)) {
     return false;
   }
-  if (typeof params.args.input === "string") {
-    return matchesRuntimePatchInput(params.args.input, params.operation);
+  if (typeof args.input === "string") {
+    const patchWorkingDirectory =
+      typeof args.cwd === "string"
+        ? path.resolve(params.workspaceDir, args.cwd)
+        : params.workspaceDir;
+    return matchesRuntimePatchInput(
+      args.input,
+      params.operation,
+      params.workspaceDir,
+      patchWorkingDirectory,
+    );
   }
-  const changes = params.args.changes;
+  const changes = args.changes;
   if (!Array.isArray(changes) || changes.length !== 1 || !isRecord(changes[0])) {
     return false;
   }
@@ -245,8 +288,50 @@ function matchesRuntimePatchArguments(params: {
       : path.resolve(params.workspaceDir, "..", RUNTIME_PATCH_DENIED_FILENAME);
   return (
     operation === params.operation &&
-    path.resolve(params.workspaceDir, change.path) === expectedPath
+    canonicalRuntimePatchPath(params.workspaceDir, change.path) ===
+      canonicalRuntimePatchPath(params.workspaceDir, expectedPath)
   );
+}
+
+function describeRuntimePatchArguments(args: unknown): string {
+  if (typeof args === "string") {
+    return JSON.stringify({
+      type: "string",
+      length: args.length,
+      patchEnvelope: args.startsWith("*** Begin Patch"),
+    });
+  }
+  if (!isRecord(args)) {
+    return JSON.stringify({ type: args === null ? "null" : typeof args });
+  }
+  return JSON.stringify({
+    type: "object",
+    keys: Object.keys(args).toSorted(),
+    inputType: typeof args.input,
+    patchHeaders:
+      typeof args.input === "string"
+        ? args.input
+            .replace(/\r\n?/gu, "\n")
+            .split("\n")
+            .filter((line) =>
+              /^\*\*\* (?:Begin Patch|End Patch|Add File: |Update File: |Delete File: )/u.test(
+                line,
+              ),
+            )
+            .slice(0, 4)
+        : undefined,
+    changes: Array.isArray(args.changes)
+      ? args.changes.map((change) => {
+          if (!isRecord(change)) {
+            return { type: change === null ? "null" : typeof change };
+          }
+          return {
+            path: typeof change.path === "string" ? change.path : undefined,
+            kind: isRecord(change.kind) ? change.kind.type : change.kind,
+          };
+        })
+      : undefined,
+  });
 }
 
 async function formatRuntimePatchMutationDiagnostics(params: {
@@ -390,7 +475,9 @@ function extractTranscriptToolCalls(
           normalizeToolCallId(block.toolCallId) ??
           normalizeToolCallId(block.toolUseId),
         tool,
-        args: block.input ?? block.arguments ?? block.args ?? block.payload ?? null,
+        // OpenClaw mirrors provider arguments separately; a placeholder input
+        // can be empty even though arguments contains the executed patch.
+        args: block.arguments ?? block.input ?? block.args ?? block.payload ?? null,
       });
     }
   }
@@ -445,6 +532,19 @@ function isFailureLikeToolResult(params: {
   );
 }
 
+function isHardFailureToolResult(params: {
+  type?: string;
+  text: string;
+  isError?: unknown;
+  is_error?: unknown;
+}) {
+  return (
+    isStructuredFailureToolResult(params) ||
+    isHardFailureToolOutputText(params.text) ||
+    isWorkspaceBoundaryFailureToolOutput(params.text)
+  );
+}
+
 function isStructuredFailureToolResult(params: {
   type?: string;
   isError?: unknown;
@@ -480,6 +580,11 @@ function extractTranscriptToolResults(
         normalizeToolCallId(message.id),
       ...(tool ? { tool } : {}),
       text,
+      hardFailure: isHardFailureToolResult({
+        text,
+        isError: message.isError,
+        is_error: message.is_error,
+      }),
       structuredFailure,
       failure: isFailureLikeToolResult({
         text,
@@ -523,6 +628,12 @@ function extractTranscriptToolResults(
         normalizeToolCallId(block.id),
       ...(blockTool ? { tool: blockTool } : {}),
       text,
+      hardFailure: isHardFailureToolResult({
+        type,
+        text,
+        isError: block.isError,
+        is_error: block.is_error,
+      }),
       structuredFailure,
       failure: isFailureLikeToolResult({
         type,
@@ -828,12 +939,14 @@ export async function runRuntimeToolFixture(
   const metadata = readRuntimeToolCoverageMetadata({
     config,
   });
-  const dynamicExposureIntentionallyExcluded =
+  const forcedCodexNativeWorkspace =
     env.gateway.runtimeEnv.OPENCLAW_QA_FORCE_RUNTIME === "codex" &&
-    metadata.expectedLayer === "codex-native-workspace" &&
-    !tools.has(toolName);
+    metadata.expectedLayer === "codex-native-workspace";
+  // Effective tool discovery may advertise the native name. The forced
+  // runtime and scenario owner, not inventory absence, decide who executes it.
+  const dynamicExposureIntentionallyExcluded = forcedCodexNativeWorkspace && !tools.has(toolName);
   const requireCodexNativePatchCoverage =
-    dynamicExposureIntentionallyExcluded && metadata.required && toolName === "apply_patch";
+    forcedCodexNativeWorkspace && metadata.required && toolName === "apply_patch";
   const expectedAvailable = readBoolean(config.expectedAvailable, true);
   if (!tools.has(toolName) && !dynamicExposureIntentionallyExcluded) {
     if (!expectedAvailable) {
@@ -887,7 +1000,9 @@ export async function runRuntimeToolFixture(
         sessionKey: happySessionKey,
         message: happyPrompt,
         timeoutMs: liveTurnTimeoutMs(env, 45_000),
-        ...(happyPathOutputRequired && requireTranscriptEvidence
+        ...(happyPathOutputRequired &&
+        requireTranscriptEvidence &&
+        !requireNativePatchTranscriptEvidence
           ? { transcriptToolName: toolName, requireSuccessfulTranscriptToolResult: true }
           : {}),
       });
@@ -930,7 +1045,9 @@ export async function runRuntimeToolFixture(
         sessionKey: failureSessionKey,
         message: failurePrompt,
         timeoutMs: liveTurnTimeoutMs(env, 45_000),
-        ...(requireTranscriptEvidence ? { transcriptToolName: toolName } : {}),
+        ...(requireTranscriptEvidence && !requireNativePatchTranscriptEvidence
+          ? { transcriptToolName: toolName }
+          : {}),
       });
     if (toolName !== "apply_patch") {
       return runFailurePrompt();
@@ -985,7 +1102,7 @@ export async function runRuntimeToolFixture(
         );
       }
     }
-    if (happyRequest.outputRequest?.failure) {
+    if (happyRequest.outputRequest?.hardFailure) {
       if (isKnownHarnessGap(config.knownHarnessGap)) {
         skipFixture(formatKnownHarnessGapDetails(toolName, config));
       }
@@ -1003,7 +1120,9 @@ export async function runRuntimeToolFixture(
       })
     ) {
       throw fixtureError(
-        new Error(`expected linked live apply_patch to add ${RUNTIME_PATCH_HAPPY_FILENAME}`),
+        new Error(
+          `expected linked live apply_patch to add ${RUNTIME_PATCH_HAPPY_FILENAME}; observed linked arguments: ${describeRuntimePatchArguments(happyRequest.executedRequest?.args)}`,
+        ),
       );
     }
     const failureRequest = await runFixtureOperation(() =>
@@ -1043,7 +1162,9 @@ export async function runRuntimeToolFixture(
       })
     ) {
       throw fixtureError(
-        new Error(`expected linked live apply_patch to update ../${RUNTIME_PATCH_DENIED_FILENAME}`),
+        new Error(
+          `expected linked live apply_patch to update ../${RUNTIME_PATCH_DENIED_FILENAME}; observed linked arguments: ${describeRuntimePatchArguments(failureRequest.executedRequest?.args)}`,
+        ),
       );
     }
     if (

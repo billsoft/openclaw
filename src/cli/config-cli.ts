@@ -150,7 +150,7 @@ export async function runConfigGet(opts: { path: string; json?: boolean; runtime
   const runtime = opts.runtime ?? defaultRuntime;
   try {
     const parsedPath = parseConfigSetPath(opts.path);
-    const snapshot = await loadValidConfig(runtime);
+    const snapshot = await loadValidConfig(runtime, { observe: false, json: opts.json });
     const res = getAtPath(redactConfigObject(snapshot.config), parsedPath);
     if (!res.found) {
       if (opts.json) {
@@ -180,6 +180,11 @@ export async function runConfigGet(opts: { path: string; json?: boolean; runtime
   } catch (err) {
     if (err instanceof ExitError) {
       throw err;
+    }
+    if (opts.json) {
+      writeRuntimeJson(runtime, { error: String(err) });
+      runtime.exit(1);
+      return;
     }
     runtime.error(danger(String(err)));
     runtime.exit(1);
@@ -273,10 +278,15 @@ export async function runConfigUnset(opts: {
   }
 }
 
-async function runConfigFile(opts: { runtime?: RuntimeEnv }) {
+async function runConfigFile(opts: { json?: boolean; runtime?: RuntimeEnv }) {
   const runtime = opts.runtime ?? defaultRuntime;
   try {
-    runtime.log(resolveConfigPath());
+    const path = resolveConfigPath();
+    if (opts.json) {
+      writeRuntimeJson(runtime, { path });
+      return;
+    }
+    writeRuntimeStdout(runtime, `${path}\n`);
   } catch (err) {
     runtime.error(danger(String(err)));
     runtime.exit(1);
@@ -301,7 +311,7 @@ async function runConfigValidate(opts: { json?: boolean; runtime?: RuntimeEnv } 
   const runtime = opts.runtime ?? defaultRuntime;
   let outputPath = CONFIG_PATH ?? "openclaw.json";
   try {
-    const snapshot = await readConfigFileSnapshot();
+    const snapshot = await readConfigFileSnapshot({ observe: false });
     outputPath = snapshot.path;
     const shortPath = shortenHomePath(outputPath);
     if (!snapshot.exists) {
@@ -519,10 +529,15 @@ export function registerConfigCli(program: Command) {
       await runConfigUnset({ path, cliOptions: options });
     });
 
-  cmd.command("file").description("Print the active config file path").action(runConfigFile);
+  cmd
+    .command("file")
+    .description("Print the active config file path")
+    .option("--json", "Output JSON", false)
+    .action((opts: { json?: boolean }) => runConfigFile(opts));
   cmd
     .command("schema")
     .description("Print the JSON schema for openclaw.json")
+    .option("--json", "Output JSON", false)
     .action(runConfigSchema);
   cmd
     .command("validate")

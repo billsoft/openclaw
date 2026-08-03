@@ -1,4 +1,5 @@
 // Qa Lab helper module supports qa gateway config behavior.
+import { OPENCLAW_VERSION } from "openclaw/plugin-sdk/agent-harness-runtime";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import type { ModelProviderConfig } from "openclaw/plugin-sdk/provider-model-shared";
 import { uniqueStrings } from "openclaw/plugin-sdk/string-coerce-runtime";
@@ -133,7 +134,15 @@ export function buildQaGatewayConfig(params: {
     selectedPluginIds.map((pluginId) => [
       pluginId,
       params.forcedRuntime === "codex" && pluginId === "codex"
-        ? { enabled: true, config: { appServer: { sandbox: "workspace-write" } } }
+        ? {
+            enabled: true,
+            config: {
+              appServer: {
+                sandbox: "workspace-write",
+                ...(params.fastMode === true ? { serviceTier: "priority" } : {}),
+              },
+            },
+          }
         : { enabled: true },
     ]),
   );
@@ -200,6 +209,9 @@ export function buildQaGatewayConfig(params: {
       : {};
 
   return {
+    meta: {
+      lastTouchedVersion: OPENCLAW_VERSION,
+    },
     memory: {
       backend: "builtin",
       search: {

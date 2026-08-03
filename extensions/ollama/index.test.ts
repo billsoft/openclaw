@@ -31,6 +31,7 @@ const ensureOllamaModelPulledMock = vi.hoisted(() => vi.fn(async () => {}));
 const checkOllamaCloudAuthMock = vi.hoisted(() => vi.fn());
 const configureOllamaNonInteractiveMock = vi.hoisted(() => vi.fn());
 const fetchOllamaModelsMock = vi.hoisted(() => vi.fn());
+const fetchLoadedOllamaModelNamesMock = vi.hoisted(() => vi.fn());
 const buildOllamaProviderMock = vi.hoisted(() => vi.fn());
 const queryOllamaModelShowInfoMock = vi.hoisted(() => vi.fn());
 const resolveConfiguredSecretInputStringMock = vi.hoisted(() => vi.fn());
@@ -69,6 +70,11 @@ vi.mock("./api.js", () => ({
   buildOllamaModelDefinition: buildOllamaModelDefinitionMock,
 }));
 
+vi.mock("./src/provider-models.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./src/provider-models.js")>()),
+  fetchLoadedOllamaModelNames: fetchLoadedOllamaModelNamesMock,
+}));
+
 vi.mock("openclaw/plugin-sdk/secret-input-runtime", async (importOriginal) => {
   const actual = await importOriginal<typeof import("openclaw/plugin-sdk/secret-input-runtime")>();
   return {
@@ -100,6 +106,11 @@ beforeEach(() => {
   checkOllamaCloudAuthMock.mockResolvedValue({ signedIn: true });
   configureOllamaNonInteractiveMock.mockReset();
   fetchOllamaModelsMock.mockReset();
+  fetchLoadedOllamaModelNamesMock.mockReset();
+  fetchLoadedOllamaModelNamesMock.mockResolvedValue({
+    reachable: true,
+    models: ["qwen-tool", "qwen3.5:4b", "llama3.3:70b", "nomic-embed-text", "unknown-tools"],
+  });
   buildOllamaProviderMock.mockReset();
   queryOllamaModelShowInfoMock.mockReset();
   resolveConfiguredSecretInputStringMock.mockClear();
@@ -143,6 +154,23 @@ function registerProviderWithPluginConfig(pluginConfig: Record<string, unknown>)
 function registerOllamaCloudProvider() {
   return registerProvidersWithPluginConfig({}).find((provider) => provider.id === "ollama-cloud");
 }
+
+describe("ollama tool-schema compatibility", () => {
+  it("registers llama.cpp GBNF projection for local and cloud providers", () => {
+    for (const provider of registerProvidersWithPluginConfig({})) {
+      expect(provider).toMatchObject({
+        normalizeToolSchemas: expect.any(Function),
+        inspectToolSchemas: expect.any(Function),
+      });
+    }
+  });
+
+  it("keeps configured-row projection aligned with absent runtime model normalizers", () => {
+    for (const provider of registerProvidersWithPluginConfig({})) {
+      expect(provider.normalizeResolvedModel).toBeUndefined();
+    }
+  });
+});
 
 function createOllamaResetValidationContext(
   opts: Record<string, unknown> = {},
@@ -229,229 +257,134 @@ function captureWrappedOllamaPayload(
 }
 
 describe("ollama plugin", () => {
-  it("preflights an available local model before destructive non-interactive reset", async () => {
-    fetchOllamaModelsMock.mockResolvedValue({
-      reachable: true,
-      models: [{ name: "gemma4" }],
-    });
-    const ctx = createOllamaResetValidationContext({
+  it.each([
+    {
+      name: "preflights an available local model before destructive non-interactive reset",
+      models: ["gemma4"],
       customBaseUrl: "http://ollama-host:11434/",
       customModelId: "gemma4",
-    });
-
-    const provider = registerProvider();
-    expect(provider.auth[0].validateNonInteractive).toBeTypeOf("function");
-    await expect(provider.auth[0].validateNonInteractive(ctx)).resolves.toBe(true);
-
-    expect(fetchOllamaModelsMock).toHaveBeenCalledWith("http://ollama-host:11434");
-    expect(configureOllamaNonInteractiveMock).not.toHaveBeenCalled();
-    expect(ensureOllamaModelPulledMock).not.toHaveBeenCalled();
-    expect(ctx.runtime.exit).not.toHaveBeenCalled();
-  });
-
-  it("rejects an unreachable Ollama endpoint before destructive reset", async () => {
-    fetchOllamaModelsMock.mockResolvedValue({ reachable: false, models: [] });
-    const ctx = createOllamaResetValidationContext({
-      customBaseUrl: "http://ollama-host:11434",
-    });
-
-    await expect(registerProvider().auth[0].validateNonInteractive(ctx)).resolves.toBe(false);
-
-    expect(ctx.runtime.error).toHaveBeenCalledWith(
-      "Ollama could not be reached at http://ollama-host:11434.\nDownload it at https://ollama.com/download",
-    );
-    expect(ctx.runtime.exit).toHaveBeenCalledWith(1);
-    expect(configureOllamaNonInteractiveMock).not.toHaveBeenCalled();
-    expect(ensureOllamaModelPulledMock).not.toHaveBeenCalled();
-  });
-
-  it("rejects a missing requested Ollama model even when another model is available", async () => {
-    fetchOllamaModelsMock.mockResolvedValue({
-      reachable: true,
-      models: [{ name: "qwen2.5-coder:7b" }],
-    });
-    const ctx = createOllamaResetValidationContext({
-      customBaseUrl: "http://ollama-host:11434",
+    },
+    {
+      name: "rejects an unreachable Ollama endpoint before destructive reset",
+      reachable: false,
+      models: [],
+      error:
+        "Ollama could not be reached at http://ollama-host:11434.\nDownload it at https://ollama.com/download",
+    },
+    {
+      name: "rejects a missing requested Ollama model even when another model is available",
+      models: ["qwen2.5-coder:7b"],
       customModelId: "gemma4",
-    });
-
-    await expect(registerProvider().auth[0].validateNonInteractive(ctx)).resolves.toBe(false);
-
-    expect(ctx.runtime.error).toHaveBeenCalledWith(
-      "Ollama model gemma4 was not found at http://ollama-host:11434.\nAvailable models: qwen2.5-coder:7b",
-    );
-    expect(ctx.runtime.exit).toHaveBeenCalledWith(1);
-    expect(configureOllamaNonInteractiveMock).not.toHaveBeenCalled();
-    expect(ensureOllamaModelPulledMock).not.toHaveBeenCalled();
-  });
-
-  it("recognizes the implicit latest tag without pulling during reset preflight", async () => {
-    fetchOllamaModelsMock.mockResolvedValue({
-      reachable: true,
-      models: [{ name: "gemma4:latest" }],
-    });
-    const ctx = createOllamaResetValidationContext({
-      customBaseUrl: "http://ollama-host:11434",
+      error:
+        "Ollama model gemma4 was not found at http://ollama-host:11434.\nAvailable models: qwen2.5-coder:7b",
+    },
+    {
+      name: "recognizes the implicit latest tag without pulling during reset preflight",
+      models: ["gemma4:latest"],
       customModelId: "ollama/gemma4",
-    });
-
-    await expect(registerProvider().auth[0].validateNonInteractive(ctx)).resolves.toBe(true);
-
-    expect(configureOllamaNonInteractiveMock).not.toHaveBeenCalled();
-    expect(ensureOllamaModelPulledMock).not.toHaveBeenCalled();
-    expect(ctx.runtime.exit).not.toHaveBeenCalled();
-  });
-
-  it("preflights the canonical default Ollama model without pulling it", async () => {
-    fetchOllamaModelsMock.mockResolvedValue({
-      reachable: true,
-      models: [{ name: "gemma4:latest" }],
-    });
-    const ctx = createOllamaResetValidationContext({
-      customBaseUrl: "http://ollama-host:11434",
-    });
-
-    await expect(registerProvider().auth[0].validateNonInteractive(ctx)).resolves.toBe(true);
-
-    expect(configureOllamaNonInteractiveMock).not.toHaveBeenCalled();
-    expect(ensureOllamaModelPulledMock).not.toHaveBeenCalled();
-    expect(ctx.runtime.exit).not.toHaveBeenCalled();
-  });
-
-  it("rejects an unavailable default Ollama model before destructive reset", async () => {
-    fetchOllamaModelsMock.mockResolvedValue({
-      reachable: true,
-      models: [{ name: "qwen2.5-coder:7b" }],
-    });
-    const ctx = createOllamaResetValidationContext({
-      customBaseUrl: "http://ollama-host:11434",
-    });
-
-    await expect(registerProvider().auth[0].validateNonInteractive(ctx)).resolves.toBe(false);
-
-    expect(ctx.runtime.error).toHaveBeenCalledWith(
-      "Ollama model gemma4 was not found at http://ollama-host:11434.\nAvailable models: qwen2.5-coder:7b",
-    );
-    expect(ctx.runtime.exit).toHaveBeenCalledWith(1);
-    expect(configureOllamaNonInteractiveMock).not.toHaveBeenCalled();
-    expect(ensureOllamaModelPulledMock).not.toHaveBeenCalled();
-  });
-
-  it("refuses to pull an unavailable local model during destructive-reset preflight", async () => {
-    fetchOllamaModelsMock.mockResolvedValue({ reachable: true, models: [] });
-    const ctx = createOllamaResetValidationContext({
-      customBaseUrl: "http://ollama-host:11434",
+    },
+    {
+      name: "preflights the canonical default Ollama model without pulling it",
+      models: ["gemma4:latest"],
+    },
+    {
+      name: "rejects an unavailable default Ollama model before destructive reset",
+      models: ["qwen2.5-coder:7b"],
+      error:
+        "Ollama model gemma4 was not found at http://ollama-host:11434.\nAvailable models: qwen2.5-coder:7b",
+    },
+    {
+      name: "refuses to pull an unavailable local model during destructive-reset preflight",
+      models: [],
       customModelId: "gemma4",
-    });
-
-    await expect(registerProvider().auth[0].validateNonInteractive(ctx)).resolves.toBe(false);
-
-    expect(ctx.runtime.error).toHaveBeenCalledWith(
-      "No Ollama models are available at http://ollama-host:11434.\nPull a model first, then re-run setup.",
-    );
-    expect(ctx.runtime.exit).toHaveBeenCalledWith(1);
-    expect(configureOllamaNonInteractiveMock).not.toHaveBeenCalled();
-    expect(ensureOllamaModelPulledMock).not.toHaveBeenCalled();
-  });
-
-  it("preflights an authenticated and confirmed cloud model without pulling it", async () => {
-    fetchOllamaModelsMock.mockResolvedValue({ reachable: true, models: [] });
-    const ctx = createOllamaResetValidationContext({
-      customBaseUrl: "http://ollama-host:11434",
+      error:
+        "No Ollama models are available at http://ollama-host:11434.\nPull a model first, then re-run setup.",
+    },
+    {
+      name: "preflights an authenticated and confirmed cloud model without pulling it",
+      models: [],
       customModelId: "ollama/kimi-k2.5:cloud",
-    });
-
-    await expect(registerProvider().auth[0].validateNonInteractive(ctx)).resolves.toBe(true);
-
-    expect(checkOllamaCloudAuthMock).toHaveBeenCalledWith("http://ollama-host:11434");
-    expect(queryOllamaModelShowInfoMock).toHaveBeenCalledWith(
-      "http://ollama-host:11434",
-      "kimi-k2.5:cloud",
-    );
-    expect(configureOllamaNonInteractiveMock).not.toHaveBeenCalled();
-    expect(ensureOllamaModelPulledMock).not.toHaveBeenCalled();
-    expect(ctx.runtime.exit).not.toHaveBeenCalled();
-  });
-
-  it("rejects an unauthenticated Ollama cloud model before destructive reset", async () => {
-    fetchOllamaModelsMock.mockResolvedValue({ reachable: true, models: [] });
-    checkOllamaCloudAuthMock.mockResolvedValue({
-      signedIn: false,
-      signinUrl: "https://ollama.com/signin",
-    });
-    const ctx = createOllamaResetValidationContext({
-      customBaseUrl: "http://ollama-host:11434",
+      cloud: "confirmed",
+    },
+    {
+      name: "rejects an unauthenticated Ollama cloud model before destructive reset",
+      models: [],
       customModelId: "kimi-k2.5:cloud",
-    });
-
-    await expect(registerProvider().auth[0].validateNonInteractive(ctx)).resolves.toBe(false);
-
-    expect(ctx.runtime.error).toHaveBeenCalledWith(
-      "Cloud models on this Ollama host need `ollama signin`.\nhttps://ollama.com/signin",
-    );
-    expect(ctx.runtime.exit).toHaveBeenCalledWith(1);
-    expect(queryOllamaModelShowInfoMock).not.toHaveBeenCalled();
-    expect(configureOllamaNonInteractiveMock).not.toHaveBeenCalled();
-    expect(ensureOllamaModelPulledMock).not.toHaveBeenCalled();
-  });
-
-  it("rejects an unconfirmed Ollama cloud model before destructive reset", async () => {
-    fetchOllamaModelsMock.mockResolvedValue({ reachable: true, models: [] });
-    queryOllamaModelShowInfoMock.mockResolvedValue({});
-    const ctx = createOllamaResetValidationContext({
-      customBaseUrl: "http://ollama-host:11434",
+      cloud: "unauthenticated",
+      error: "Cloud models on this Ollama host need `ollama signin`.\nhttps://ollama.com/signin",
+    },
+    {
+      name: "rejects an unconfirmed Ollama cloud model before destructive reset",
+      models: [],
       customModelId: "kimi-k2.5:cloud",
-    });
-
-    await expect(registerProvider().auth[0].validateNonInteractive(ctx)).resolves.toBe(false);
-
-    expect(ctx.runtime.error).toHaveBeenCalledWith(
-      "Ollama model kimi-k2.5:cloud was not found at http://ollama-host:11434.\nAvailable models: (none)",
-    );
-    expect(ctx.runtime.exit).toHaveBeenCalledWith(1);
-    expect(configureOllamaNonInteractiveMock).not.toHaveBeenCalled();
-    expect(ensureOllamaModelPulledMock).not.toHaveBeenCalled();
-  });
-
-  it("confirms a catalog-listed Ollama cloud model before destructive reset", async () => {
+      cloud: "unconfirmed",
+      error:
+        "Ollama model kimi-k2.5:cloud was not found at http://ollama-host:11434.\nAvailable models: (none)",
+    },
+    {
+      name: "confirms a catalog-listed Ollama cloud model before destructive reset",
+      models: ["kimi-k2.5:cloud"],
+      customModelId: "kimi-k2.5:cloud",
+      cloud: "confirmed",
+    },
+    {
+      name: "rejects a stale catalog-listed Ollama cloud model before destructive reset",
+      models: ["kimi-k2.5:cloud"],
+      customModelId: "kimi-k2.5:cloud",
+      cloud: "unconfirmed",
+      error:
+        "Ollama model kimi-k2.5:cloud was not found at http://ollama-host:11434.\nAvailable models: kimi-k2.5:cloud",
+    },
+  ] as Array<{
+    name: string;
+    models: string[];
+    reachable?: boolean;
+    customBaseUrl?: string;
+    customModelId?: string;
+    cloud?: "confirmed" | "unauthenticated" | "unconfirmed";
+    error?: string;
+  }>)("$name", async ({ models, reachable = true, customBaseUrl, customModelId, cloud, error }) => {
     fetchOllamaModelsMock.mockResolvedValue({
-      reachable: true,
-      models: [{ name: "kimi-k2.5:cloud" }],
+      reachable,
+      models: models.map((name) => ({ name })),
     });
+    if (cloud === "unauthenticated") {
+      checkOllamaCloudAuthMock.mockResolvedValue({
+        signedIn: false,
+        signinUrl: "https://ollama.com/signin",
+      });
+    }
+    if (cloud === "unconfirmed") {
+      queryOllamaModelShowInfoMock.mockResolvedValue({});
+    }
+
     const ctx = createOllamaResetValidationContext({
-      customBaseUrl: "http://ollama-host:11434",
-      customModelId: "kimi-k2.5:cloud",
+      customBaseUrl: customBaseUrl ?? "http://ollama-host:11434",
+      ...(customModelId ? { customModelId } : {}),
     });
+    const validate = registerProvider().auth[0].validateNonInteractive;
+    expect(validate).toBeTypeOf("function");
+    await expect(validate(ctx)).resolves.toBe(!error);
 
-    await expect(registerProvider().auth[0].validateNonInteractive(ctx)).resolves.toBe(true);
-
-    expect(checkOllamaCloudAuthMock).toHaveBeenCalledWith("http://ollama-host:11434");
-    expect(queryOllamaModelShowInfoMock).toHaveBeenCalledWith(
-      "http://ollama-host:11434",
-      "kimi-k2.5:cloud",
-    );
-    expect(configureOllamaNonInteractiveMock).not.toHaveBeenCalled();
-    expect(ensureOllamaModelPulledMock).not.toHaveBeenCalled();
-    expect(ctx.runtime.exit).not.toHaveBeenCalled();
-  });
-
-  it("rejects a stale catalog-listed Ollama cloud model before destructive reset", async () => {
-    fetchOllamaModelsMock.mockResolvedValue({
-      reachable: true,
-      models: [{ name: "kimi-k2.5:cloud" }],
-    });
-    queryOllamaModelShowInfoMock.mockResolvedValue({});
-    const ctx = createOllamaResetValidationContext({
-      customBaseUrl: "http://ollama-host:11434",
-      customModelId: "kimi-k2.5:cloud",
-    });
-
-    await expect(registerProvider().auth[0].validateNonInteractive(ctx)).resolves.toBe(false);
-
-    expect(ctx.runtime.error).toHaveBeenCalledWith(
-      "Ollama model kimi-k2.5:cloud was not found at http://ollama-host:11434.\nAvailable models: kimi-k2.5:cloud",
-    );
-    expect(ctx.runtime.exit).toHaveBeenCalledWith(1);
+    if (customBaseUrl?.endsWith("/")) {
+      expect(fetchOllamaModelsMock).toHaveBeenCalledWith("http://ollama-host:11434");
+    }
+    if (cloud === "confirmed") {
+      expect(checkOllamaCloudAuthMock).toHaveBeenCalledWith("http://ollama-host:11434");
+      expect(queryOllamaModelShowInfoMock).toHaveBeenCalledWith(
+        "http://ollama-host:11434",
+        "kimi-k2.5:cloud",
+      );
+    }
+    if (cloud === "unauthenticated") {
+      expect(queryOllamaModelShowInfoMock).not.toHaveBeenCalled();
+    }
+    if (error) {
+      expect(ctx.runtime.error).toHaveBeenCalledWith(error);
+      expect(ctx.runtime.exit).toHaveBeenCalledWith(1);
+    } else {
+      expect(ctx.runtime.exit).not.toHaveBeenCalled();
+    }
     expect(configureOllamaNonInteractiveMock).not.toHaveBeenCalled();
     expect(ensureOllamaModelPulledMock).not.toHaveBeenCalled();
   });
@@ -561,7 +494,7 @@ describe("ollama plugin", () => {
     expect(result.defaultModel).toBeUndefined();
   });
 
-  it("discovers and prepares an installed tool-capable model without pulling it", async () => {
+  it("discovers and prepares a loaded tool-capable model without pulling it", async () => {
     const provider = registerProvider();
     const guided = provider.auth[0].appGuidedSetup;
     buildOllamaProviderMock.mockResolvedValue({
@@ -610,7 +543,74 @@ describe("ollama plugin", () => {
     expect(ensureOllamaModelPulledMock).not.toHaveBeenCalled();
   });
 
-  it("prefers the strongest tool-calling family among installed models", async () => {
+  it("does not auto-detect installed models that are not loaded", async () => {
+    const provider = registerProvider();
+    fetchLoadedOllamaModelNamesMock.mockResolvedValue({ reachable: true, models: [] });
+
+    await expect(
+      provider.auth[0].appGuidedSetup?.detect({ config: {}, env: {} }),
+    ).resolves.toBeNull();
+
+    expect(buildOllamaProviderMock).not.toHaveBeenCalled();
+    expect(queryOllamaModelShowInfoMock).not.toHaveBeenCalled();
+  });
+
+  it("selects only from loaded models when stronger installed models are idle", async () => {
+    const provider = registerProvider();
+    fetchLoadedOllamaModelNamesMock.mockResolvedValue({
+      reachable: true,
+      models: ["llama3.3:70b"],
+    });
+    buildOllamaProviderMock.mockResolvedValue({
+      baseUrl: "http://127.0.0.1:11434",
+      api: "ollama",
+      models: [
+        { id: "llama3.3:70b", name: "llama3.3:70b", compat: { supportsTools: true } },
+        { id: "qwen3.5:4b", name: "qwen3.5:4b", compat: { supportsTools: true } },
+      ],
+    });
+
+    await expect(provider.auth[0].appGuidedSetup?.detect({ config: {}, env: {} })).resolves.toEqual(
+      {
+        modelRef: "ollama/llama3.3:70b",
+        detail: "llama3.3:70b at http://127.0.0.1:11434",
+      },
+    );
+    expect(queryOllamaModelShowInfoMock).toHaveBeenCalledTimes(1);
+    expect(queryOllamaModelShowInfoMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:11434",
+      "llama3.3:70b",
+      undefined,
+    );
+  });
+
+  it("rechecks loaded state before preparing the detected route", async () => {
+    const provider = registerProvider();
+    buildOllamaProviderMock.mockResolvedValue({
+      baseUrl: "http://127.0.0.1:11434",
+      api: "ollama",
+      models: [{ id: "qwen-tool", name: "qwen-tool", compat: { supportsTools: true } }],
+    });
+
+    await expect(provider.auth[0].appGuidedSetup?.detect({ config: {}, env: {} })).resolves.toEqual(
+      {
+        modelRef: "ollama/qwen-tool",
+        detail: "qwen-tool at http://127.0.0.1:11434",
+      },
+    );
+    fetchLoadedOllamaModelNamesMock.mockResolvedValue({ reachable: true, models: [] });
+
+    await expect(
+      provider.auth[0].appGuidedSetup?.prepare({
+        config: {},
+        env: {},
+        modelRef: "ollama/qwen-tool",
+      }),
+    ).resolves.toBeNull();
+    expect(buildOllamaProviderMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("prefers the strongest tool-calling family among loaded models", async () => {
     const provider = registerProvider();
     buildOllamaProviderMock.mockResolvedValue({
       baseUrl: "http://127.0.0.1:11434",
@@ -703,6 +703,10 @@ describe("ollama plugin", () => {
       "https://ollama.example.com",
       expect.objectContaining(providerAccess),
     );
+    expect(fetchLoadedOllamaModelNamesMock).toHaveBeenCalledWith(
+      "https://ollama.example.com",
+      providerAccess,
+    );
   });
 
   it("keeps environment-backed Ollama access for the completion proposal", async () => {
@@ -755,6 +759,7 @@ describe("ollama plugin", () => {
       | { apiKey?: string; quiet?: boolean }
       | undefined;
     expect(options?.apiKey).toBeUndefined();
+    expect(fetchLoadedOllamaModelNamesMock).toHaveBeenCalledWith("http://127.0.0.1:11434", {});
   });
 
   it("honors the Ollama discovery opt-out during app-guided detection", async () => {
@@ -768,6 +773,7 @@ describe("ollama plugin", () => {
         env: {},
       }),
     ).resolves.toBeNull();
+    expect(fetchLoadedOllamaModelNamesMock).not.toHaveBeenCalled();
     expect(buildOllamaProviderMock).not.toHaveBeenCalled();
   });
 
@@ -1985,7 +1991,7 @@ describe("ollama plugin", () => {
     expect(rows).toHaveLength(8);
   });
 
-  it("keeps unknown requested Ollama models unresolved when show has no metadata", async () => {
+  it("keeps unknown requested Ollama models unresolved when show inspection fails", async () => {
     const provider = registerProvider();
     const previous = process.env.OLLAMA_API_KEY;
     process.env.OLLAMA_API_KEY = "ollama-local";
@@ -1994,7 +2000,7 @@ describe("ollama plugin", () => {
       api: "ollama",
       models: [],
     });
-    queryOllamaModelShowInfoMock.mockResolvedValueOnce({});
+    queryOllamaModelShowInfoMock.mockResolvedValueOnce({ showInspectionFailed: true });
 
     try {
       await provider.prepareDynamicModel?.({

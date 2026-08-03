@@ -16,16 +16,17 @@ import {
 import type { InternalHookEvent } from "../../hooks/internal-hooks.js";
 import { resetSystemEventsForTest } from "../../infra/system-events.js";
 import { createLazyRuntimeModule } from "../../shared/lazy-runtime.js";
+import type { GatewayRequestContext } from "../server-methods/types.js";
 import { startGatewayServerHarness, type GatewayServerHarness } from "../server.e2e-ws-harness.js";
 import {
   connectOk,
   embeddedRunMock,
   installGatewayTestHooks,
   agentDiscoveryMock,
-  rpcReq,
   testState,
   writeSessionStore,
 } from "../test-helpers.js";
+import { sessionHandlerTestSurface } from "./server-sessions-handlers.test-support.js";
 
 export const getSessionManagerModule = createLazyRuntimeModule(
   () => import("../../agents/sessions/index.js"),
@@ -36,7 +37,7 @@ export const getGatewayConfigModule = createLazyRuntimeModule(
 );
 
 export async function getSessionsHandlers() {
-  return (await import("../server-methods/sessions.js")).sessionsHandlers;
+  return sessionHandlerTestSurface;
 }
 
 type TestTranscriptMessage = Record<string, unknown> & {
@@ -129,7 +130,7 @@ const sessionCleanupMocks = vi.hoisted(() => ({
     );
     return { followupCleared: 0, laneCleared: 0, keys: clearedKeys };
   }),
-  stopSubagentsForRequester: vi.fn(() => ({ stopped: 0 })),
+  stopSubagentsForRequester: vi.fn(async () => ({ stopped: 0 })),
 }));
 
 const bootstrapCacheMocks = vi.hoisted(() => ({
@@ -551,12 +552,23 @@ export function sessionStoreEntry(sessionId: string, overrides: Partial<SessionE
   };
 }
 
+function writeSessionFixture(
+  sessionFile: string,
+  session: { getPersistedEntries(): unknown[] },
+): void {
+  const contents = session
+    .getPersistedEntries()
+    .map((entry) => JSON.stringify(entry))
+    .join("\n");
+  fsSync.writeFileSync(sessionFile, `${contents}\n`, "utf8");
+}
+
 export async function createCheckpointFixture(
   dir: string,
   options: { legacyPreCompactionSnapshot?: boolean } = { legacyPreCompactionSnapshot: true },
 ) {
   const { SessionManager } = await getSessionManagerModule();
-  const session = SessionManager.create(dir, dir);
+  const session = SessionManager.inMemory(dir);
   const userMessage: UserMessage = {
     role: "user",
     content: "before compaction",
@@ -591,10 +603,8 @@ export async function createCheckpointFixture(
   if (!preCompactionLeafId) {
     throw new Error("expected persisted session leaf before compaction");
   }
-  const sessionFile = session.getSessionFile();
-  if (!sessionFile) {
-    throw new Error("expected persisted session file");
-  }
+  const sessionFile = path.join(dir, `${session.getSessionId()}.jsonl`);
+  writeSessionFixture(sessionFile, session);
   const legacyPreCompactionSnapshot = options.legacyPreCompactionSnapshot ?? true;
   const preCompactionSessionFile = legacyPreCompactionSnapshot
     ? path.join(dir, `${path.parse(sessionFile).name}.checkpoint-test.jsonl`)
@@ -603,13 +613,14 @@ export async function createCheckpointFixture(
     fsSync.copyFileSync(sessionFile, preCompactionSessionFile);
   }
   const preCompactionSession = preCompactionSessionFile
-    ? SessionManager.open(preCompactionSessionFile, dir)
+    ? SessionManager.fromEntries(session.getPersistedEntries(), dir)
     : undefined;
   session.appendCompaction("checkpoint summary", preCompactionLeafId, 123, { ok: true });
   const postCompactionLeafId = session.getLeafId();
   if (!postCompactionLeafId) {
     throw new Error("expected post-compaction leaf");
   }
+  writeSessionFixture(sessionFile, session);
   return {
     session,
     sessionId: session.getSessionId(),
@@ -649,21 +660,6 @@ export function expectNoSessionQueueCleanup() {
   expect(sessionCleanupMocks.clearSessionQueues).not.toHaveBeenCalled();
 }
 
-export async function getMainPreviewEntry(ws: import("ws").WebSocket) {
-  const preview = await rpcReq<{
-    previews: Array<{
-      key: string;
-      status: string;
-      items: Array<{ role: string; text: string }>;
-    }>;
-  }>(ws, "sessions.preview", { keys: ["main"], limit: 3, maxChars: 120 });
-  expect(preview.ok).toBe(true);
-  const entry = preview.payload?.previews[0];
-  expect(entry?.key).toBe("main");
-  expect(entry?.status).toBe("ok");
-  return entry;
-}
-
 type SessionsHandlers = Awaited<ReturnType<typeof getSessionsHandlers>>;
 
 export async function directSessionReq<TPayload = unknown>(
@@ -678,6 +674,9 @@ export async function directSessionReq<TPayload = unknown>(
 ): Promise<{ ok: boolean; payload?: TPayload; error?: { code?: string; message?: string } }> {
   const sessionsHandlers = await getSessionsHandlers();
   const { getRuntimeConfig } = await getGatewayConfigModule();
+  const loadGatewayModelCatalog =
+    (opts?.context?.loadGatewayModelCatalog as GatewayRequestContext["loadGatewayModelCatalog"]) ??
+    (async () => agentDiscoveryMock.models);
   let result:
     | { ok: boolean; payload?: TPayload; error?: { code?: string; message?: string } }
     | undefined;
@@ -705,7 +704,8 @@ export async function directSessionReq<TPayload = unknown>(
       chatQueuedTurns: new Map(),
       dedupe: new Map(),
       getSessionEventSubscriberConnIds: () => new Set<string>(),
-      loadGatewayModelCatalog: async () => agentDiscoveryMock.models,
+      loadGatewayModelCatalog,
+      readPreparedGatewayModelCatalog: loadGatewayModelCatalog,
       getRuntimeConfig,
       ...opts?.context,
     } as never,

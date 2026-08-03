@@ -1,11 +1,54 @@
 import { describe, expect, it } from "vitest";
 import {
+  enforceOutputLimit,
+  enforceResultLimit,
   isCodeModeEngagedForModel,
   prepareSource,
   resolveCodeModeConfig,
 } from "./code-mode-runtime.js";
+import { parseCodeModeScriptSyntax } from "./code-mode-script-syntax.js";
 
 const config = resolveCodeModeConfig({ tools: { codeMode: true } } as never);
+
+describe("Code Mode output accounting", () => {
+  it("accepts Unicode output at its exact serialized byte limit", () => {
+    const output = [{ type: "text", text: "😀 café" }];
+    const maxOutputBytes = Buffer.byteLength(JSON.stringify(output), "utf8");
+
+    expect(() => enforceOutputLimit(output, { ...config, maxOutputBytes })).not.toThrow();
+    expect(() =>
+      enforceOutputLimit(output, { ...config, maxOutputBytes: maxOutputBytes - 1 }),
+    ).toThrow("code mode output limit exceeded");
+  });
+
+  it("counts serialized output only once against the returned value", () => {
+    const output = [{ type: "text", text: "😀" }];
+    const value = { result: "café" };
+    const maxOutputBytes =
+      Buffer.byteLength(JSON.stringify(output), "utf8") +
+      Buffer.byteLength(JSON.stringify(value), "utf8");
+
+    expect(() =>
+      enforceResultLimit({ output, value, config: { ...config, maxOutputBytes } }),
+    ).not.toThrow();
+    expect(() =>
+      enforceResultLimit({
+        output,
+        value,
+        config: { ...config, maxOutputBytes: maxOutputBytes - 1 },
+      }),
+    ).toThrow("code mode output limit exceeded");
+  });
+
+  it("does not charge an empty output array against the returned value", () => {
+    const value = "ok";
+    const maxOutputBytes = Buffer.byteLength(JSON.stringify(value), "utf8");
+
+    expect(() =>
+      enforceResultLimit({ output: [], value, config: { ...config, maxOutputBytes } }),
+    ).not.toThrow();
+  });
+});
 
 describe("Code Mode master switch resolution", () => {
   it.each([
@@ -13,8 +56,8 @@ describe("Code Mode master switch resolution", () => {
     { name: "boolean shorthand false", codeMode: false, enabled: false },
     { name: "auto shorthand", codeMode: "auto", enabled: "auto" },
     { name: "object enabled auto", codeMode: { enabled: "auto" }, enabled: "auto" },
-    { name: "object without enabled", codeMode: { timeoutMs: 5000 }, enabled: false },
-    { name: "omitted", codeMode: undefined, enabled: false },
+    { name: "object without enabled", codeMode: { timeoutMs: 5000 }, enabled: "auto" },
+    { name: "omitted", codeMode: undefined, enabled: "auto" },
   ])("resolves enabled for $name", ({ codeMode, enabled }) => {
     expect(resolveCodeModeConfig({ tools: { codeMode } } as never).enabled).toBe(enabled);
   });
@@ -62,6 +105,15 @@ describe("Code Mode master switch resolution", () => {
 });
 
 describe("Code Mode guest source validation", () => {
+  it("reports syntax errors at user-relative locations", () => {
+    expect(parseCodeModeScriptSyntax("const x = ;")).toEqual({
+      ok: false,
+      message: "Unexpected token",
+      line: 1,
+      column: 10,
+    });
+  });
+
   it.each([
     {
       name: "import-shaped template text",

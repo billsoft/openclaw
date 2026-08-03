@@ -165,8 +165,25 @@ export type ChannelAccountSnapshot = {
   lastMessageAt?: number | null;
   lastEventAt?: number | null;
   lastTransportActivityAt?: number | null;
+  stateReason?: string;
   lastError?: string | null;
+  /**
+   * Legacy channel-authored health label; channel plugins should publish `lifecycle` instead.
+   * Core-derived policy writes remain supported. There is no removal date; removal awaits
+   * external plugin adoption.
+   */
   healthState?: string;
+  /**
+   * Recorded account lifecycle, independent of inferred transport health.
+   * Optional so channels that never publish lifecycle remain unaffected.
+   */
+  lifecycle?: "starting" | "ready" | "recovering" | "blocked" | "stopped";
+  /**
+   * Inbound admission, which is a different failure domain from `connected`.
+   * Optional-`true` on purpose: there is no `false` to mistake for "unknown",
+   * so the 20+ channels that never report ingress at all stay unaffected.
+   */
+  ingressUnavailable?: true;
   terminalDisconnect?: boolean;
   lastStartAt?: number | null;
   lastStopAt?: number | null;

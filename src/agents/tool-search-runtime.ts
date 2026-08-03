@@ -284,6 +284,7 @@ function getTelemetry(catalog: ToolSearchCatalogSession) {
   return {
     catalogSize: catalog.entries.length,
     sources,
+    counterScope: catalog.counterScope,
     searchCount: catalog.searchCount,
     describeCount: catalog.describeCount,
     callCount: catalog.callCount,
@@ -540,6 +541,7 @@ export class ToolSearchRuntime {
   namespaceEntries = () =>
     resolveCatalog(this.ctx).entries.map((entry) =>
       Object.assign(compactToolSearchCatalogEntry(entry), {
+        ...(entry.mcp ? { mcp: entry.mcp } : {}),
         parameters: entry.parameters ?? {},
       }),
     );
