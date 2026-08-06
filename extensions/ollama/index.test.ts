@@ -1,9 +1,5 @@
 // Ollama tests cover index plugin behavior.
 import { expectDefined } from "@openclaw/normalization-core";
-import {
-  describeImageWithModel,
-  describeImagesWithModel,
-} from "openclaw/plugin-sdk/media-understanding";
 import type { ProviderAuthMethod } from "openclaw/plugin-sdk/plugin-entry";
 import { createTestPluginApi } from "openclaw/plugin-sdk/plugin-test-api";
 import { clearLiveCatalogCacheForTests } from "openclaw/plugin-sdk/provider-catalog-shared";
@@ -14,6 +10,7 @@ import { OLLAMA_DEFAULT_API_KEY } from "./src/discovery-shared.js";
 const promptAndConfigureOllamaMock = vi.hoisted(() =>
   vi.fn(async () => ({
     credential: "ollama-local",
+    defaultModel: "ollama/qwen-tool",
     config: {
       models: {
         providers: {
@@ -55,28 +52,16 @@ const buildOllamaModelDefinitionMock = vi.hoisted(() =>
   }),
 );
 const createConfiguredOllamaStreamFnMock = vi.hoisted(() =>
-  vi.fn((_params: { model: unknown; providerBaseUrl?: string }) => ({}) as never),
+  vi.fn((_params: { model: unknown; providerBaseUrl?: string }) => (() => ({})) as never),
 );
-
-vi.mock("./api.js", () => ({
-  promptAndConfigureOllama: promptAndConfigureOllamaMock,
-  ensureOllamaModelPulled: ensureOllamaModelPulledMock,
-  configureOllamaNonInteractive: configureOllamaNonInteractiveMock,
-  fetchOllamaModels: fetchOllamaModelsMock,
-  resolveOllamaApiBase: (baseUrl?: string) =>
-    (baseUrl ?? "http://127.0.0.1:11434").replace(/\/+$/, "").replace(/\/v1$/i, ""),
-  resolveOllamaSetupDefaultBaseUrl: (env: NodeJS.ProcessEnv = process.env) =>
-    ["1", "true", "yes", "on"].includes(env.OPENCLAW_DOCKER_SETUP?.trim().toLowerCase() ?? "")
-      ? "http://host.docker.internal:11434"
-      : "http://127.0.0.1:11434",
-  buildOllamaProvider: buildOllamaProviderMock,
-  queryOllamaModelShowInfo: queryOllamaModelShowInfoMock,
-  buildOllamaModelDefinition: buildOllamaModelDefinitionMock,
-}));
 
 vi.mock("./src/provider-models.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./src/provider-models.js")>()),
+  buildOllamaModelDefinition: buildOllamaModelDefinitionMock,
+  buildOllamaProvider: buildOllamaProviderMock,
+  fetchOllamaModels: fetchOllamaModelsMock,
   fetchLoadedOllamaModelNames: fetchLoadedOllamaModelNamesMock,
+  queryOllamaModelShowInfo: queryOllamaModelShowInfoMock,
 }));
 
 vi.mock("openclaw/plugin-sdk/secret-input-runtime", async (importOriginal) => {
@@ -89,18 +74,17 @@ vi.mock("openclaw/plugin-sdk/secret-input-runtime", async (importOriginal) => {
   };
 });
 
-vi.mock("./src/setup.js", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("./src/setup.js")>()),
+vi.mock("./src/setup.runtime.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./src/setup.runtime.js")>()),
   checkOllamaCloudAuth: checkOllamaCloudAuthMock,
+  configureOllamaNonInteractive: configureOllamaNonInteractiveMock,
+  ensureOllamaModelPulled: ensureOllamaModelPulledMock,
+  promptAndConfigureOllama: promptAndConfigureOllamaMock,
 }));
 
-vi.mock("./src/stream.js", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("./src/stream.js")>();
-  return {
-    ...actual,
-    createConfiguredOllamaStreamFn: createConfiguredOllamaStreamFnMock,
-  };
-});
+vi.mock("./src/stream-registration.js", () => ({
+  createLazyConfiguredOllamaStreamFn: createConfiguredOllamaStreamFnMock,
+}));
 
 beforeEach(() => {
   clearLiveCatalogCacheForTests();
@@ -518,7 +502,7 @@ describe("ollama plugin", () => {
     expect(registerTool).toHaveBeenCalledWith(expect.objectContaining({ name: "node_inference" }));
   });
 
-  it("does not preselect a default model during provider auth setup", async () => {
+  it("returns the exact model selected during provider auth setup", async () => {
     const provider = registerProvider();
 
     const result = await provider.auth[0].run({
@@ -547,7 +531,7 @@ describe("ollama plugin", () => {
         },
       },
     });
-    expect(result.defaultModel).toBeUndefined();
+    expect(result.defaultModel).toBe("ollama/qwen-tool");
   });
 
   it("discovers and prepares a loaded tool-capable model without pulling it", async () => {
@@ -635,6 +619,72 @@ describe("ollama plugin", () => {
     ).resolves.toBeNull();
 
     expect(buildOllamaProviderMock).not.toHaveBeenCalled();
+    expect(queryOllamaModelShowInfoMock).not.toHaveBeenCalled();
+  });
+
+  it("prepares the exact configured model even when it is installed but idle", async () => {
+    const provider = registerProvider();
+    const config = {
+      models: {
+        providers: {
+          ollama: {
+            baseUrl: "http://127.0.0.1:11434",
+            api: "ollama" as const,
+            models: [
+              {
+                id: "qwen-tool",
+                name: "qwen-tool",
+                reasoning: false,
+                input: ["text"] as const,
+                cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+                contextWindow: 32_768,
+                maxTokens: 8_192,
+                compat: { supportsTools: true },
+              },
+            ],
+          },
+        },
+      },
+    };
+    fetchLoadedOllamaModelNamesMock.mockResolvedValue({ reachable: true, models: [] });
+    mockDiscoveredOllamaProvider([
+      { id: "qwen-tool", name: "qwen-tool", compat: { supportsTools: true } },
+    ]);
+
+    await expect(
+      provider.auth[0].appGuidedSetup?.prepare({
+        config,
+        env: {},
+        modelRef: "ollama/qwen-tool",
+      }),
+    ).resolves.toMatchObject({
+      defaultModel: "ollama/qwen-tool",
+      configPatch: {
+        models: {
+          providers: {
+            ollama: {
+              models: [expect.objectContaining({ id: "qwen-tool" })],
+            },
+          },
+        },
+      },
+    });
+    expect(fetchLoadedOllamaModelNamesMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects an explicit installed model that setup did not configure", async () => {
+    const provider = registerProvider();
+    mockDiscoveredOllamaProvider([
+      { id: "other-model", name: "other-model", compat: { supportsTools: true } },
+    ]);
+
+    await expect(
+      provider.auth[0].appGuidedSetup?.prepare({
+        config: {},
+        env: {},
+        modelRef: "ollama/other-model",
+      }),
+    ).resolves.toBeNull();
     expect(queryOllamaModelShowInfoMock).not.toHaveBeenCalled();
   });
 
@@ -2453,8 +2503,8 @@ describe("ollama plugin", () => {
     const ollamaMedia = expectDefined(mediaProviders[0], "Ollama media provider");
     expect(ollamaMedia.id).toBe("ollama");
     expect(ollamaMedia.capabilities).toEqual(["image"]);
-    expect(ollamaMedia.describeImage).toBe(describeImageWithModel);
-    expect(ollamaMedia.describeImages).toBe(describeImagesWithModel);
+    expect(ollamaMedia.describeImage).toBeTypeOf("function");
+    expect(ollamaMedia.describeImages).toBeTypeOf("function");
     // Intentional: no defaultModels or autoPriority. Ollama vision models are
     // user-installed (llava, qwen2.5vl, …) with no universal default, and we
     // don't want Ollama to auto-steal image duty from configured providers.
