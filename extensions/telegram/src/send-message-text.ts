@@ -54,27 +54,24 @@ type SendTextOptions = {
 };
 
 function buildTelegramTextSendReceipt(params: {
-  messageIds: readonly string[];
-  chatId: string;
-  messageThreadId?: number;
+  results: readonly TelegramSendResult[];
   replyToMessageId?: number;
 }) {
-  if (params.messageIds.length <= 1) {
+  if (params.results.length === 0) {
     return undefined;
   }
-  return createMessageReceiptFromOutboundResults({
-    results: params.messageIds.map((messageId) => ({
-      messageId,
-      chatId: params.chatId,
-    })),
+  if (params.results.length === 1) {
+    return params.results[0]?.receipt;
+  }
+  const receipt = createMessageReceiptFromOutboundResults({
+    results: params.results,
     kind: "text",
-    ...(typeof params.messageThreadId === "number"
-      ? { threadId: String(params.messageThreadId) }
-      : {}),
     ...(typeof params.replyToMessageId === "number"
       ? { replyToId: String(params.replyToMessageId) }
       : {}),
   });
+  receipt.parts = receipt.parts.map((part, index) => ({ ...part, index }));
+  return receipt;
 }
 
 export function createTelegramTextSender(config: {
@@ -87,8 +84,11 @@ export function createTelegramTextSender(config: {
   reportDelivery: (
     messageId: string | number,
     deliveredChatId: string | number,
+    message: TelegramMessageLike,
     meta?: TelegramSendResult["meta"],
-  ) => Promise<void>;
+    kind?: "text" | "media",
+    onPrepared?: (delivery: TelegramSendResult) => void,
+  ) => Promise<TelegramSendResult>;
   recordDeliveredPromptContext: (
     params: Omit<
       Parameters<typeof recordOutboundMessageForPromptContext>[0],
@@ -149,14 +149,16 @@ export function createTelegramTextSender(config: {
       withTelegramNativeQuoteFallback({
         label,
         requestParams,
-        request: (effectiveParams, retryLabel) =>
-          requestWithChatNotFound(
+        request: async (effectiveParams, retryLabel) => {
+          await opts.onPlatformSendDispatch?.();
+          return await requestWithChatNotFound(
             () =>
               Object.keys(effectiveParams).length > 0
                 ? api.sendMessage(chatId, messageText, effectiveParams)
                 : api.sendMessage(chatId, messageText),
             retryLabel,
-          ),
+          );
+        },
       });
     const requestPlain = (label: string) =>
       requestSendMessage(label, chunk.plainText, plainParams ?? {});
@@ -239,7 +241,6 @@ export function createTelegramTextSender(config: {
       plainText: string;
       reportChatId: string | number;
       hasInlineKeyboard: boolean;
-      reported: boolean;
     };
 
     let lastMessageId = "";
@@ -250,27 +251,25 @@ export function createTelegramTextSender(config: {
       | undefined;
     let acceptedReplyToMessageId: number | undefined;
     const messageIds: string[] = [];
+    const deliveryResults: TelegramSendResult[] = [];
     let sentChunkCount = 0;
     let pendingChunk: PendingChunk | undefined;
+    let finalMeta: TelegramSendResult["meta"] | undefined;
 
     const flushChunk = async (chunk: PendingChunk, finalPart: boolean) => {
-      let hasInlineKeyboard = chunk.hasInlineKeyboard;
       let keyboardError: unknown;
       if (finalPart && replyMarkup && !chunk.hasInlineKeyboard) {
         try {
           await api.editMessageReplyMarkup(chunk.reportChatId, chunk.messageId, {
             reply_markup: replyMarkup,
           });
-          hasInlineKeyboard = true;
+          finalMeta = {
+            telegramDeliveredText: chunk.plainText,
+            telegramHasInlineKeyboard: true,
+          };
         } catch (error) {
           keyboardError = error;
         }
-      }
-      if (!chunk.reported) {
-        await reportDelivery(chunk.messageId, chunk.reportChatId, {
-          telegramDeliveredText: chunk.plainText,
-          telegramHasInlineKeyboard: hasInlineKeyboard,
-        });
       }
       await recordDeliveredPromptContext(
         {
@@ -320,13 +319,17 @@ export function createTelegramTextSender(config: {
       }
       sentChunkCount += 1;
       recordSentMessage(chatId, messageId, cfg);
-      const reported = !replyMarkup;
-      if (reported) {
-        await reportDelivery(messageId, params.result?.chat?.id ?? chatId, {
+      await reportDelivery(
+        messageId,
+        params.result?.chat?.id ?? chatId,
+        params.result,
+        {
           telegramDeliveredText: params.plainText,
           telegramHasInlineKeyboard: params.hasInlineKeyboard,
-        });
-      }
+        },
+        "text",
+        (delivery) => deliveryResults.push(delivery),
+      );
       const previousChunk = pendingChunk;
       pendingChunk = {
         result: params.result,
@@ -335,7 +338,6 @@ export function createTelegramTextSender(config: {
         plainText: params.plainText,
         reportChatId: params.result?.chat?.id ?? chatId,
         hasInlineKeyboard: params.hasInlineKeyboard,
-        reported,
       };
       if (previousChunk) {
         await flushChunk(previousChunk, false);
@@ -358,23 +360,20 @@ export function createTelegramTextSender(config: {
         });
       }
       const receipt = buildTelegramTextSendReceipt({
-        messageIds,
-        chatId: lastChatId,
-        messageThreadId: lastAcceptedParams?.message_thread_id,
+        results: deliveryResults,
         replyToMessageId: acceptedReplyToMessageId,
       });
       return {
         messageId: lastMessageId,
         chatId: lastChatId,
         ...(receipt ? { receipt } : {}),
+        ...(finalMeta ? { meta: finalMeta } : {}),
       };
     };
 
     const partialDeliveryResult = () => {
       const receipt = buildTelegramTextSendReceipt({
-        messageIds,
-        chatId: lastChatId,
-        messageThreadId: lastAcceptedParams?.message_thread_id,
+        results: deliveryResults,
         replyToMessageId: acceptedReplyToMessageId,
       });
       return {

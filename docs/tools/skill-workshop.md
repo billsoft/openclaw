@@ -110,6 +110,13 @@ Update an existing workspace skill:
 Update trip-planning to also check seat maps before booking.
 ```
 
+If a skill used in the current turn proves wrong or incomplete, the agent reads
+the live skill and creates a targeted patch proposal. A runtime receipt limits
+this flow to skills used in that run. Autonomous mode `off` disables repair,
+`propose` leaves the patch pending until explicitly applied, and `auto` scans and
+applies it immediately. The repaired skill is loaded by new sessions; the
+running session keeps its original skill snapshot.
+
 Iterate on a pending proposal:
 
 ```text
@@ -235,14 +242,15 @@ and paths outside the standard support folders.
 ## Agent tool
 
 The model uses `skill_workshop` with one required `action`:
-`create | update | revise | list | inspect | evaluate | apply | reject | quarantine`.
+`create | read | patch | update | revise | list | inspect | evaluate | apply | reject | quarantine`.
 Other parameters apply depending on the action:
 
 | Parameter                  | Used by                                                          | Notes                                                                |
 | -------------------------- | ---------------------------------------------------------------- | -------------------------------------------------------------------- |
 | `name`                     | `create`, `inspect`, `revise`                                    | Required for `create`; resolves a pending proposal by name otherwise |
 | `description`              | `create`, `update`, `revise`                                     | Max 160 bytes                                                        |
-| `skill_name`               | `update`                                                         | Existing skill name or key                                           |
+| `skill_name`               | `read`, `patch`, `update`                                        | Existing skill name or key                                           |
+| `old_string`, `new_string` | `patch`                                                          | Exact current text and its replacement; read the skill first         |
 | `proposal_content`         | `create`, `update`, `revise`                                     | Required for create/update; omit on revise to preserve the body      |
 | `support_files`            | `create`, `update`, `revise`                                     | Array of `{ path, content }`                                         |
 | `goal`, `evidence`         | `create`, `update`, `revise`                                     | Free-text context                                                    |
@@ -266,15 +274,14 @@ Skill Workshop tool, so run proposal review actions from a normal host-side
 agent session or the CLI.
 </Note>
 
-## Suggested skills
+## Self-learning
 
-OpenClaw detects durable instructions such as “next time,” “remember to,” and reactive corrections
-when an interactive turn ends, including failed turns. On the next turn, the agent offers to save
-the most recent detected workflow through `skill_workshop`; the user decides whether to create a
-proposal. This built-in suggestion does not create or change a skill by itself. Set
-`skills.workshop.autonomous.mode` to `propose` to create pending proposals directly, or to `auto`
-to apply scanner-approved captures through the normal Workshop service. The Control UI Workshop
-tab shows whether self-learning is on; use the config setting to choose all three modes.
+After substantial work, an isolated background review can turn corrections and
+successful procedures into Workshop proposals; see
+[Self-learning](/tools/self-learning). Set `skills.workshop.autonomous.mode` to
+`propose` to create pending proposals, or to `auto` to apply scanner-approved
+captures through the normal Workshop service. The Control UI Workshop tab shows
+whether self-learning is on; use the config setting to choose all three modes.
 
 ### Scan past sessions
 
@@ -303,10 +310,13 @@ are stored in the shared OpenClaw state database; transcript content is not copi
 into scan state.
 
 In `propose` and `auto` modes, OpenClaw can also perform a conservative review after successful,
-substantial work and after the whole agent system becomes idle. That isolated review can create or
-revise at most one pending proposal. It cannot update a live skill or apply, reject, or quarantine a
-proposal. In `auto` mode, the orchestrating capture pipeline applies the result afterward through
-the normal scanner-gated service.
+substantial work and after the whole agent system becomes idle. The review receives an
+authoritative receipt of skills the foreground run actually used. It can draft at most one pending
+proposal: a new skill, a patch or full-body rewrite of an existing workspace skill, or a revision
+of a pending proposal. Existing skills must be read before either update form, and the proposal is
+bound to that exact content hash. The reviewer never writes a live skill directly and cannot
+apply, reject, or quarantine a proposal. In `auto` mode, the orchestrating pipeline applies every
+autonomous result afterward through the normal scanner-gated service, without operator review.
 
 See [Self-learning](/tools/self-learning) for enablement, eligibility, privacy and cost details,
 the proposal threshold, and troubleshooting.
@@ -331,23 +341,20 @@ the proposal threshold, and troubleshooting.
 
 | Setting                    | Default  | Effect                                                                                                                                                              |
 | -------------------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `autonomous.mode`          | `"auto"` | `"off"` keeps the suggestion nudge, `"propose"` creates pending captures, and `"auto"` applies captures through the normal Workshop scanner and apply path.         |
+| `autonomous.mode`          | `"auto"` | `"off"` disables autonomous capture, `"propose"` creates pending captures, and `"auto"` applies captures through the normal Workshop scanner and apply path.        |
 | `allowSymlinkTargetWrites` | `false`  | Lets apply write through workspace skill symlinks whose real target is listed in `skills.load.allowSymlinkTargets`.                                                 |
 | `approvalPolicy`           | `"auto"` | `"auto"` skips an additional prompt for agent-initiated `apply`, `reject`, or `quarantine` (the agent still has to call the action). `"pending"` requires approval. |
 | `maxPending`               | `50`     | Caps pending and quarantined proposals per workspace (1-200).                                                                                                       |
 | `maxSkillBytes`            | `40000`  | Caps proposal body size in bytes (1024-200000).                                                                                                                     |
 
-Autonomous capture in `propose` and `auto` modes recognizes prospective rules (for example, “from now on”) and reactive
-corrections (for example, “that’s not what I asked”). It groups new instructions by topic into up
-to three proposals per turn, routes vocabulary matches to existing writable workspace skills, and
-revises its own pending proposal when another correction targets the same skill.
-
-For successful substantial work without an explicit correction, an isolated run of the selected
-model decides whether the completed trajectory clears the conservative proposal bar. The
-foreground model is not prompted to learn before it replies. The background reviewer preserves the
-foreground run as proposal provenance, cannot access general agent tools, and cannot make lifecycle
-decisions. In `auto` mode, the capture pipeline applies the resulting pending proposal only after
-the isolated run completes. The review starts only when the foreground runtime reports its resolved model
+In `propose` and `auto` modes, an isolated run of the selected model decides whether the
+completed trajectory clears the evidence-gated proposal bar. The foreground model is not prompted
+to learn before it replies. The background reviewer preserves the foreground run as proposal
+provenance, cannot access general agent tools, and cannot make lifecycle decisions. In `auto`
+mode, the capture pipeline applies every autonomous proposal only after the isolated run
+completes. Existing-skill changes require a complete read receipt and content-hash binding before
+they are eligible for that apply step. The review starts
+only when the foreground runtime reports its resolved model
 and that `skill_workshop` was actually available. Restrictive or unknown tool policy therefore
 fails closed and creates no proposal.
 

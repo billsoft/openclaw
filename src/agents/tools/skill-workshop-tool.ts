@@ -1,3 +1,4 @@
+import { truncateUtf16Safe } from "@openclaw/normalization-core/utf16-slice";
 /**
  * Skill Workshop built-in tool.
  *
@@ -5,8 +6,13 @@
  */
 import { Type } from "typebox";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
+import { sha256Hex } from "../../infra/crypto-digest.js";
+import { hasRunWorkspaceSkillUsage } from "../../skills/runtime/run-usage.js";
+import { resolveSkillWorkshopConfig } from "../../skills/workshop/config.js";
+import { stripProposalFrontmatterForSkill } from "../../skills/workshop/frontmatter.js";
 import {
   applySkillProposal,
+  composeSkillBodyPatch,
   evaluateSkillProposal,
   listSkillProposals,
   proposeCreateSkill,
@@ -15,6 +21,7 @@ import {
   rejectSkillProposal,
   resolvePendingSkillProposal,
   reviseSkillProposal,
+  SkillProposalStaleTargetError,
 } from "../../skills/workshop/service.js";
 import { SKILL_AUTHORING_STANDARDS_PROMPT } from "../../skills/workshop/skill-authoring-standards.js";
 import type {
@@ -24,6 +31,7 @@ import type {
   SkillWorkshopProposalMutationBudget,
   SkillWorkshopProposalReviewCompletion,
 } from "../../skills/workshop/types.js";
+import { readWritableWorkspaceSkill } from "../../skills/workshop/workspace-skill-read.js";
 import { stringEnum } from "../schema/typebox.js";
 import {
   asToolParamsRecord,
@@ -52,7 +60,9 @@ import {
 
 const SKILL_WORKSHOP_ACTIONS = [
   "create",
+  "patch",
   "update",
+  "read",
   "revise",
   "list",
   "inspect",
@@ -61,12 +71,20 @@ const SKILL_WORKSHOP_ACTIONS = [
   "reject",
   "quarantine",
 ] as const;
-const SKILL_WORKSHOP_PROPOSAL_ACTIONS = ["create", "revise", "list", "inspect"] as const;
-const SKILL_WORKSHOP_PROPOSAL_COMPLETION_ACTIONS = [
-  ...SKILL_WORKSHOP_PROPOSAL_ACTIONS,
-  "complete",
-] as const;
-const SKILL_WORKSHOP_MUTATION_ACTIONS = new Set(["create", "update", "revise"]);
+function resolveProposalOnlyActions(updateProposals: boolean, supportsCompletion: boolean) {
+  return [
+    "create",
+    ...(updateProposals ? ["patch", "update", "read"] : []),
+    "revise",
+    "list",
+    "inspect",
+    ...(supportsCompletion ? ["complete"] : []),
+  ];
+}
+const SKILL_WORKSHOP_MUTATION_ACTIONS = new Set(["create", "patch", "update", "revise"]);
+// Reads give the model the text it must quote to patch. Composition still uses
+// the authoritative live body, while the cap bounds provider payloads.
+const SKILL_WORKSHOP_READ_MAX_CHARS = 20_000;
 const SKILL_PROPOSAL_STATUSES = [
   "pending",
   "applied",
@@ -89,16 +107,18 @@ function requireProposalContent(content: string | undefined): string {
   return content;
 }
 
-function buildSkillWorkshopToolSchema(proposalOnly: boolean, supportsCompletion: boolean) {
-  const proposalActions = supportsCompletion
-    ? SKILL_WORKSHOP_PROPOSAL_COMPLETION_ACTIONS
-    : SKILL_WORKSHOP_PROPOSAL_ACTIONS;
+function buildSkillWorkshopToolSchema(
+  proposalOnly: boolean,
+  supportsCompletion: boolean,
+  updateProposals: boolean,
+) {
+  const proposalActions = resolveProposalOnlyActions(updateProposals, supportsCompletion);
   return Type.Object(
     {
-      action: stringEnum(proposalOnly ? proposalActions : SKILL_WORKSHOP_ACTIONS, {
+      action: stringEnum(proposalOnly ? proposalActions : [...SKILL_WORKSHOP_ACTIONS], {
         description: proposalOnly
-          ? `create = new skill; revise = existing pending proposal; list/inspect discover pending proposals (not filesystem search).${supportsCompletion ? " complete = durably finish this review after all proposal work." : ""} Live-skill updates and lifecycle actions are unavailable.`
-          : "create = new skill; update = existing live skill; revise = existing pending proposal; list/inspect discover pending proposals (not filesystem search); evaluate runs plugin evaluators for the exact draft; apply/reject/quarantine are explicit lifecycle actions.",
+          ? `create = new skill;${updateProposals ? " patch = targeted find-and-replace on an existing live skill (quote the exact current text in old_string, replacement in new_string; empty old_string appends new_string at the end); read = bounded excerpt of an existing live skill (required before patch or update); update = full-body rewrite of an existing live skill after reading it;" : ""} revise = existing pending proposal; list/inspect discover pending proposals (not filesystem search).${supportsCompletion ? " complete = durably finish this review after all proposal work." : ""} Nothing writes a live skill directly; lifecycle actions are unavailable.`
+          : "create = new skill; read = existing live skill; patch = targeted find-and-replace after reading; update = full-body rewrite; revise = existing pending proposal; list/inspect discover pending proposals (not filesystem search); evaluate runs plugin evaluators for the exact draft; apply/reject/quarantine are explicit lifecycle actions.",
       }),
       proposal_id: Type.Optional(
         Type.String({
@@ -128,19 +148,32 @@ function buildSkillWorkshopToolSchema(proposalOnly: boolean, supportsCompletion:
       description: Type.Optional(
         Type.String({
           maxLength: 160,
-          description: proposalOnly
-            ? "Skill description for create/revise; max 160 bytes."
-            : "Skill description for create/update/revise; max 160 bytes. On update, concise text shortens the proposal listing entry.",
+          description:
+            "Skill description for create/update/revise; max 160 bytes. On update, concise text shortens the proposal listing entry.",
         }),
       ),
       skill_name: Type.Optional(
-        Type.String({ description: "Existing skill name or key for action=update." }),
+        Type.String({
+          description:
+            "Existing skill name or key for action=update, action=patch, or action=read.",
+        }),
+      ),
+      old_string: Type.Optional(
+        Type.String({
+          description:
+            "For action=patch: the exact current skill text to replace, quoted from read. Must match exactly once. Empty string appends new_string at the end of the skill.",
+        }),
+      ),
+      new_string: Type.Optional(
+        Type.String({
+          description:
+            "For action=patch: the replacement text (or the appended section when old_string is empty). Author it fully — steps, pitfalls, verification — in the skill's existing style.",
+        }),
       ),
       proposal_content: Type.Optional(
         Type.String({
-          description: proposalOnly
-            ? "Complete final skill body for action=create, or when action=revise changes the body. Must be the full skill content ready to become the active SKILL.md — not a plan, diff, change description, or implementation notes. On revise, omit this field to preserve the current body, or preserve all existing content except changes the user explicitly requested. Proposal frontmatter is added automatically. Keep under configured skills.workshop.maxSkillBytes; default max is 40000 bytes."
-            : "Complete final skill body for action=create or action=update, or when action=revise changes the body. Must be the full skill content ready to become the active SKILL.md — not a plan, diff, change description, or implementation notes. On revise, omit this field to preserve the current body. On update/revise, preserve all existing content except changes the user explicitly requested. Proposal frontmatter is added automatically. Keep under configured skills.workshop.maxSkillBytes; default max is 40000 bytes.",
+          description:
+            "Complete final skill body for action=create or action=update, or when action=revise changes the body. Must be the full skill content ready to become the active SKILL.md — not a plan, diff, change description, or implementation notes. On revise, omit this field to preserve the current body. On update/revise, preserve all existing content except changes the user explicitly requested. Proposal frontmatter is added automatically. Keep under configured skills.workshop.maxSkillBytes; default max is 40000 bytes.",
         }),
       ),
       support_files: Type.Optional(
@@ -190,6 +223,8 @@ type SkillWorkshopToolOptions = {
   origin?: SkillProposalOrigin;
   /** Internal reviewers may inspect and draft bounded pending proposals, never change lifecycle state. */
   proposalOnly?: boolean;
+  /** Allows proposal-only sessions to draft update proposals for existing live skills. */
+  updateProposals?: boolean;
   /** Marks proposals created by an autonomous capture pipeline. */
   autonomousCapture?: boolean;
   /** Run-scoped budget shared by every tool instance created across retries. */
@@ -201,39 +236,55 @@ type SkillWorkshopToolOptions = {
 function buildSkillWorkshopToolDescription(
   proposalOnly: boolean,
   supportsCompletion: boolean,
+  updateProposals: boolean,
+  autonomousMode: "off" | "propose" | "auto",
 ): string {
   if (!proposalOnly) {
-    return `Create/update/revise/list/inspect/evaluate/apply/reject/quarantine reusable-procedure skill proposals.\n\n${SKILL_AUTHORING_STANDARDS_PROMPT}`;
+    const repairPolicy =
+      autonomousMode === "off"
+        ? "Foreground repair is disabled."
+        : autonomousMode === "propose"
+          ? "A foreground patch to a skill used in this run stays pending for review."
+          : "A foreground patch to a skill used in this run is scanned and applied immediately.";
+    return `Read, patch, create, update, revise, inspect, evaluate, and apply reusable-procedure skill proposals. ${repairPolicy}\n\n${SKILL_AUTHORING_STANDARDS_PROMPT}`;
   }
   const completion = supportsCompletion ? " complete = durably finish this review." : "";
-  return `Inspect reusable-procedure skill proposals and create or revise pending proposals.${completion} Live-skill updates and lifecycle actions are unavailable.\n\n${SKILL_AUTHORING_STANDARDS_PROMPT}`;
+  const draftKinds = updateProposals ? "create, update, or revise" : "create or revise";
+  return `Inspect reusable-procedure skill proposals and draft pending ${draftKinds} proposals.${completion} Nothing writes a live skill directly; lifecycle actions are unavailable.\n\n${SKILL_AUTHORING_STANDARDS_PROMPT}`;
 }
 
 /** Create the Skill Workshop tool for proposal discovery and lifecycle actions. */
 export function createSkillWorkshopTool(options: SkillWorkshopToolOptions): AnyAgentTool {
+  const workshopConfig = resolveSkillWorkshopConfig(options.config);
+  const readSkillHashes =
+    options.proposalMutationBudget?.readSkillHashes ?? new Map<string, string>();
+  if (options.proposalMutationBudget) {
+    options.proposalMutationBudget.readSkillHashes = readSkillHashes;
+  }
   return {
     label: "Skill Workshop",
     name: "skill_workshop",
-    displaySummary: "Propose a reusable skill",
+    displaySummary: "Propose or improve a reusable skill",
     description: buildSkillWorkshopToolDescription(
       options.proposalOnly === true,
       options.proposalReviewCompletion !== undefined,
+      options.updateProposals === true,
+      workshopConfig.autonomous.mode,
     ),
     parameters: buildSkillWorkshopToolSchema(
       options.proposalOnly === true,
       options.proposalReviewCompletion !== undefined,
+      options.updateProposals === true,
     ),
     execute: async (_toolCallId, args) => {
       const params = asToolParamsRecord(args);
       const action = readStringParam(params, "action", { required: true });
-      const proposalActions = options.proposalReviewCompletion
-        ? SKILL_WORKSHOP_PROPOSAL_COMPLETION_ACTIONS
-        : SKILL_WORKSHOP_PROPOSAL_ACTIONS;
+      const proposalActions = resolveProposalOnlyActions(
+        options.updateProposals === true,
+        options.proposalReviewCompletion !== undefined,
+      );
 
-      if (
-        options.proposalOnly === true &&
-        !(proposalActions as readonly string[]).includes(action)
-      ) {
+      if (options.proposalOnly === true && !proposalActions.includes(action)) {
         throw new ToolInputError("this Skill Workshop session can only inspect or draft proposals");
       }
 
@@ -248,6 +299,33 @@ export function createSkillWorkshopTool(options: SkillWorkshopToolOptions): AnyA
         proposalReviewPhase(options.proposalReviewCompletion) !== "open"
       ) {
         throw new ToolInputError("this Skill Workshop review is already completing or complete");
+      }
+
+      if (action === "read") {
+        if (options.proposalOnly === true && options.updateProposals !== true) {
+          throw new ToolInputError("this Skill Workshop session cannot read live skills");
+        }
+        const skill = await readWritableWorkspaceSkill(
+          options.workspaceDir,
+          readStringParam(params, "skill_name", { required: true, label: "skill_name" }),
+          { config: options.config, agentId: options.agentId },
+        );
+        const truncated = skill.content.length > SKILL_WORKSHOP_READ_MAX_CHARS;
+        // A truncated read is context, not sight of the whole skill: it earns no
+        // receipt, so oversized skills cannot be patched by a reviewer that never
+        // saw their later content.
+        if (truncated) {
+          readSkillHashes.delete(skill.skillKey);
+        } else {
+          readSkillHashes.set(skill.skillKey, sha256Hex(skill.content));
+        }
+        const text = truncated
+          ? `${truncateUtf16Safe(skill.content, SKILL_WORKSHOP_READ_MAX_CHARS)}\n[truncated: skill exceeds the Workshop read budget]`
+          : skill.content;
+        return {
+          content: [{ type: "text", text }],
+          details: { skillKey: skill.skillKey, truncated },
+        };
       }
 
       if (action === "list") {
@@ -364,7 +442,7 @@ export function createSkillWorkshopTool(options: SkillWorkshopToolOptions): AnyA
       }
 
       const proposalContent = readStringParam(params, "proposal_content", {
-        required: action !== "revise",
+        required: action !== "revise" && action !== "patch",
         label: "proposal_content",
         trim: false,
       });
@@ -374,6 +452,67 @@ export function createSkillWorkshopTool(options: SkillWorkshopToolOptions): AnyA
       const supportFiles = readSupportFilesParam(params);
       const goal = readStringParam(params, "goal");
       const evidence = readStringParam(params, "evidence");
+
+      if (action === "patch" && options.proposalOnly === true && options.updateProposals !== true) {
+        throw new ToolInputError("this Skill Workshop session cannot patch live skills");
+      }
+      const foregroundRepair = action === "patch" && options.proposalOnly !== true;
+      if (foregroundRepair && workshopConfig.autonomous.mode === "off") {
+        throw new ToolInputError("foreground skill repair is disabled by autonomous mode off");
+      }
+      let expectedCurrentContentHash: string | undefined;
+      const requiresRead = action === "patch" || (action === "update" && options.updateProposals);
+      if (requiresRead) {
+        // The model must see the entire current skill before a targeted patch or
+        // autonomous rewrite. The service binds the proposal to that read.
+        const target = await readWritableWorkspaceSkill(
+          options.workspaceDir,
+          readStringParam(params, "skill_name", { required: true, label: "skill_name" }),
+          { config: options.config, agentId: options.agentId },
+        );
+        const readHash = readSkillHashes.get(target.skillKey);
+        if (!readHash) {
+          throw new ToolInputError(
+            target.content.length > SKILL_WORKSHOP_READ_MAX_CHARS
+              ? `skill "${target.skillKey}" exceeds the reviewer read budget and cannot be updated autonomously`
+              : `read the live skill first: call action=read with skill_name "${target.skillKey}", then ${action === "patch" ? "quote its current text in the patch" : "rewrite it from the returned content"}`,
+          );
+        }
+        if (readHash !== sha256Hex(target.content)) {
+          readSkillHashes.delete(target.skillKey);
+          throw new ToolInputError(
+            `skill "${target.skillKey}" changed since it was read: call action=read again and redraft the ${action} from the current content`,
+          );
+        }
+        expectedCurrentContentHash = readHash;
+        if (action === "patch") {
+          if (
+            foregroundRepair &&
+            !hasRunWorkspaceSkillUsage({
+              runId: options.origin?.runId,
+              name: target.skillKey,
+              skillFile: target.skillFile,
+            })
+          ) {
+            throw new ToolInputError(
+              `skill "${target.skillKey}" was not used in this run and cannot be repaired autonomously`,
+            );
+          }
+          try {
+            composeSkillBodyPatch(stripProposalFrontmatterForSkill(target.content), {
+              oldString:
+                readStringParam(params, "old_string", { label: "old_string", trim: false }) ?? "",
+              newString: readStringParam(params, "new_string", {
+                required: true,
+                label: "new_string",
+                trim: false,
+              }),
+            });
+          } catch (error) {
+            throw new ToolInputError(error instanceof Error ? error.message : String(error));
+          }
+        }
+      }
 
       const reservesMutation = SKILL_WORKSHOP_MUTATION_ACTIONS.has(action);
       if (
@@ -424,6 +563,7 @@ export function createSkillWorkshopTool(options: SkillWorkshopToolOptions): AnyA
               required: true,
               label: "skill_name",
             }),
+            expectedCurrentContentHash,
             description: readStringParam(params, "description"),
             content: requireProposalContent(proposalContent),
             supportFiles,
@@ -434,6 +574,40 @@ export function createSkillWorkshopTool(options: SkillWorkshopToolOptions): AnyA
             evidence,
           });
           contentText = proposalMutationText("Created skill update proposal", proposal.record);
+        } else if (action === "patch") {
+          // No description forwarding: a patch may only change the quoted span, and
+          // proposal rendering would regenerate frontmatter from a new description.
+          proposal = await proposeUpdateSkill({
+            workspaceDir: options.workspaceDir,
+            agentId: options.agentId,
+            eventActor: skillWorkshopAgentEventActor(options.agentId),
+            config: options.config,
+            env: options.env,
+            skillName: readStringParam(params, "skill_name", {
+              required: true,
+              label: "skill_name",
+            }),
+            expectedCurrentContentHash,
+            composePatch: {
+              oldString:
+                readStringParam(params, "old_string", { label: "old_string", trim: false }) ?? "",
+              newString: readStringParam(params, "new_string", {
+                required: true,
+                label: "new_string",
+                trim: false,
+              }),
+            },
+            createdBy: "skill-workshop",
+            ...(options.autonomousCapture || foregroundRepair ? { autonomousCapture: true } : {}),
+            ...(options.origin ? { origin: options.origin } : {}),
+            goal,
+            evidence,
+          });
+          contentText = foregroundRepair
+            ? workshopConfig.autonomous.mode === "propose"
+              ? `Created skill patch proposal ${proposal.record.id} (pending) for ${proposal.record.target.skillKey}; autonomous mode propose requires operator review.`
+              : proposalMutationText("Created skill patch proposal", proposal.record)
+            : proposalMutationText("Created skill patch proposal", proposal.record);
         } else if (action === "revise") {
           const pendingProposal = await resolvePendingSkillProposal({
             proposalId: readStringParam(params, "proposal_id", {
@@ -481,9 +655,30 @@ export function createSkillWorkshopTool(options: SkillWorkshopToolOptions): AnyA
           });
         }
 
+        if (foregroundRepair && workshopConfig.autonomous.mode === "auto") {
+          const applied = await applySkillProposal({
+            workspaceDir: options.workspaceDir,
+            agentId: options.agentId,
+            eventActor: skillWorkshopAgentEventActor(options.agentId),
+            config: options.config,
+            env: options.env,
+            proposalId: proposal.record.id,
+            expectedRevisionHash: proposal.revisionHash,
+            reason: "Foreground repair of a used skill",
+          });
+          return actionResult(applied.record, {
+            contentText: `Repaired used skill ${applied.record.target.skillKey} through proposal ${applied.record.id}.`,
+            targetSkillFile: applied.targetSkillFile,
+          });
+        }
         return proposalResult(proposal, { contentText });
       } catch (error) {
         if (reservesMutation && options.proposalMutationBudget) {
+          // A concurrent live edit is not a reviewer mutation. Preserve the budget
+          // so the reviewer can re-read the new body and redraft either update form.
+          if (error instanceof SkillProposalStaleTargetError) {
+            options.proposalMutationBudget.remaining += 1;
+          }
           options.proposalMutationBudget.failedMutations =
             (options.proposalMutationBudget.failedMutations ?? 0) + 1;
         }

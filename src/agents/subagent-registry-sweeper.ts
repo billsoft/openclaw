@@ -168,6 +168,7 @@ export function createSubagentRegistrySweeper(params: {
 
   const recovery = createInterruptedRecoveryCoordinator({
     runs,
+    getRunsForChildSession: params.getRunsForChildSession,
     getGatewayRuntime: params.getGatewayRecoveryRuntime,
     abandonLaunch: params.abandonSubagentRestartRecoveryLaunch,
     clearAcceptedRecovery: params.clearAcceptedSubagentRestartRecovery,
@@ -321,6 +322,7 @@ export function createSubagentRegistrySweeper(params: {
               runId,
               entry,
               runs,
+              getRunsForChildSession: params.getRunsForChildSession,
               loadKillRuntime: () => killRuntimeLoader.load(),
               completeSubagentRunWithRecovery: params.completeSubagentRunWithRecovery,
               retireSupersededRun: params.retireSupersededRun,
@@ -422,6 +424,9 @@ export function createSubagentRegistrySweeper(params: {
             );
             continue;
           }
+          // Retention starts after completion; a live run must never fall
+          // through to archival because an older persisted deadline expired.
+          continue;
         }
 
         if (entry.collect && entry.collectorCompletion) {
@@ -486,6 +491,17 @@ export function createSubagentRegistrySweeper(params: {
               groupId,
             });
           }
+          continue;
+        }
+        if (
+          entry.pauseReason === "sessions_yield" ||
+          entry.delivery?.status === "in_progress" ||
+          (entry.delivery?.status === "pending" &&
+            (entry.expectsCompletionMessage === true ||
+              entry.delivery.payload !== undefined ||
+              entry.delivery.disposition === "session_queued"))
+        ) {
+          // Queued or leased completion delivery owns this row until it settles.
           continue;
         }
         if (!entry.archiveAtMs && entry.cleanup === "keep" && entry.spawnMode !== "session") {

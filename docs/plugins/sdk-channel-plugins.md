@@ -77,16 +77,33 @@ and `verifyChannelMessageLiveFinalizerProofs(...)` tests so native preview,
 progress, edit, fallback/retention, cleanup, and receipt behavior cannot drift
 silently.
 
+### Progress visibility acceptance
+
+Progress callbacks report what the operator can see, not merely what a plugin queued. Return
+`true` after accepting visible progress and `false` while delivery is pending or when no visible
+update occurred. Existing synchronous and asynchronous callbacks that return `void` remain
+backward-compatible and are treated as visible; new acceptance-aware implementations should use
+an explicit boolean.
+
 Inbound receivers that defer platform acknowledgements should declare
 `message.receive.defaultAckPolicy` and `supportedAckPolicies` instead of hiding
 ack timing in monitor-local state. Cover every declared policy with
 `verifyChannelMessageReceiveAckPolicyAdapterProofs(...)`.
 
-Legacy reply helpers such as `dispatchInboundReplyWithBase` and
-`recordInboundSessionAndDispatchReply` remain available for compatibility
-dispatchers. Do not use them for new channel code; start with the `message`
-adapter, receipts, and receive/send lifecycle helpers on
-`openclaw/plugin-sdk/channel-outbound` instead.
+### TTS voice delivery
+
+Declare native voice-note behavior under `capabilities.tts.voice`. Set
+`synthesisTarget: "voice-note"` when TTS providers should produce a native
+voice-note format. Set `captionedFinalText: true` only when the outbound voice
+operation accepts visible final text and enforces its transport's caption and
+overflow rules. Core then holds final-mode streamed text for that operation and
+falls back to text when the voice payload is proven unsent.
+
+The legacy `dispatchInboundReplyWithBase` helper remains available from the
+deprecated `openclaw/plugin-sdk/inbound-reply-dispatch` compatibility shim.
+Do not use it for new channel code; start with the `message` adapter, receipts,
+and receive/send lifecycle helpers on `openclaw/plugin-sdk/channel-outbound`
+instead.
 
 ### Inbound ingress (experimental)
 
