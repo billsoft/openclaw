@@ -2,6 +2,7 @@ import type { CliDeps } from "../cli/deps.types.js";
 import type { ConfigFileSnapshot, OpenClawConfig } from "../config/types.openclaw.js";
 import type { HeartbeatRunner } from "../infra/heartbeat-runner.js";
 import type { GatewayRestartEmitter } from "../infra/restart.js";
+import type { PluginMetadataSnapshot } from "../plugins/plugin-metadata-snapshot.types.js";
 import type { ChannelHealthMonitor } from "./channel-health-monitor.js";
 import type { ChannelKind } from "./config-reload-plan.js";
 import type { GatewayReloadPlan } from "./config-reload.js";
@@ -143,6 +144,7 @@ export type GatewayReloadHandlerParams = {
   broadcast: (event: string, payload: unknown, opts?: { dropIfSlow?: boolean }) => void;
   getState: () => GatewayHotReloadState;
   setState: (state: GatewayHotReloadState) => void;
+  getPluginMetadataSnapshot?: () => PluginMetadataSnapshot | undefined;
   startChannel: GatewayChannelManager["startChannel"];
   stopChannel: GatewayChannelManager["stopChannel"];
   getChannelAutostartSuppression?: GatewayChannelManager["getAutostartSuppression"];
@@ -150,7 +152,10 @@ export type GatewayReloadHandlerParams = {
   reloadPlugins: (params: {
     nextConfig: OpenClawConfig;
     changedPaths: readonly string[];
-    beforeReplace: (channels: ReadonlySet<ChannelKind>) => Promise<void>;
+    beforeReplace: (
+      channels: ReadonlySet<ChannelKind>,
+      accounts?: ReadonlyMap<ChannelKind, ReadonlySet<string>>,
+    ) => Promise<void>;
     commitRuntime: () => Promise<void>;
     env: NodeJS.ProcessEnv;
     isAborted?: () => boolean;
@@ -176,8 +181,9 @@ export type GatewayReloadHandlerParams = {
 
 export type ManagedGatewayConfigReloaderParams = Omit<
   GatewayReloadHandlerParams,
-  "createHealthMonitor" | "logReload"
+  "assertRestartReady" | "createHealthMonitor" | "logReload"
 > & {
+  configRevisionProjector: import("./config-revision-token.js").GatewayConfigRevisionProjector;
   minimalTestGateway: boolean;
   initialConfig: OpenClawConfig;
   initialCompareConfig?: OpenClawConfig;

@@ -72,6 +72,9 @@ export async function runManagerTurn(params: {
   writeSessionMeta: WriteManagerSessionMeta;
 }): Promise<void> {
   const { input, sessionKey } = params;
+  if (input.admittedRunContext.operationalRunInstance.runId !== input.requestId) {
+    throw new Error("ACP operational run instance disagrees with the admitted request");
+  }
   const turnStartedAt = Date.now();
   const actorKey = normalizeActorKey(sessionKey);
   const taskContext =
@@ -263,6 +266,7 @@ export async function runManagerTurn(params: {
               mode: input.mode,
               requestId: input.requestId,
               signal: combinedSignal,
+              onElicitation: input.onElicitation,
             },
             eventGate,
             onOutputEvent: (event) => {

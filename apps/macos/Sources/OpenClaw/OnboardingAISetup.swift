@@ -15,6 +15,8 @@ import OpenClawProtocol
 @MainActor
 @Observable
 final class OnboardingAISetupModel {
+    static let setupDetectionRequestTimeoutMs = 40000
+
     /// Device-code providers advertise windows up to 15 minutes. Keep transport
     /// alive long enough for approval plus the post-login inference probe.
     static let providerAuthRequestTimeoutMs: Double = 1_200_000
@@ -613,7 +615,7 @@ extension OnboardingAISetupModel {
             let data = try await gateway.request(
                 method: "openclaw.setup.detect",
                 params: [:],
-                timeoutMs: 20000,
+                timeoutMs: Double(Self.setupDetectionRequestTimeoutMs),
                 ifCurrentServerLease: lease)
             guard await self.gateway.isCurrentServerLease(lease),
                   self.isCurrentAttempt(context),
@@ -711,15 +713,22 @@ extension OnboardingAISetupModel {
         }
     }
 
-    private func captureAttemptContext() -> AttemptContext? {
+    private func captureAttemptContext(
+        supersededAttemptDeadline: Date? = nil) -> AttemptContext?
+    {
         let identity = self.routeIdentityProvider()?.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let identity, !identity.isEmpty else { return nil }
-        return AttemptContext(token: self.attemptToken, routeIdentity: identity)
+        return AttemptContext(
+            token: self.attemptToken,
+            routeIdentity: identity,
+            supersededAttemptDeadline: supersededAttemptDeadline)
     }
 
-    private func beginAttemptContext() -> AttemptContext? {
+    private func beginAttemptContext(
+        supersededAttemptDeadline: Date? = nil) -> AttemptContext?
+    {
         self.attemptToken = UUID()
-        return self.captureAttemptContext()
+        return self.captureAttemptContext(supersededAttemptDeadline: supersededAttemptDeadline)
     }
 
     private func isCurrentAttempt(_ context: AttemptContext) -> Bool {
@@ -759,9 +768,34 @@ extension OnboardingAISetupModel {
     }
 
     func userSelect(kind: String) {
-        guard !self.isBusy, !self.connected else { return }
-        guard let context = beginAttemptContext() else { return }
-        Task { await self.activate(kind: kind, context: context) }
+        guard self.canSelectCandidate(kind: kind) else { return }
+        var supersededKind: String?
+        var supersededAttemptDeadline: Date?
+        if self.phase == .testing, let selectedKind = self.selectedKind {
+            // A user pick supersedes auto-testing; the attempt token rejects every late result.
+            supersededKind = selectedKind
+            let routeIdentity = self.routeIdentityProvider()
+            supersededAttemptDeadline = routeIdentity.flatMap {
+                self.activePendingActivationDeadline(for: $0)
+            }
+                ?? Date().addingTimeInterval(
+                    Self.activationRequestTimeoutMs(for: selectedKind) / 1000 + 5)
+        }
+        guard let context = beginAttemptContext(
+            supersededAttemptDeadline: supersededAttemptDeadline)
+        else { return }
+        // A fresh user-picked attempt owns the verdict; keeping the stale
+        // "none of the found options worked" card up during its test would
+        // contradict the visible Testing state.
+        self.exhaustedAutoCandidates = false
+        if let supersededKind {
+            self.statuses[supersededKind] = .untried
+            self.selectedKind = kind
+            self.statuses[kind] = .testing
+        }
+        Task {
+            await self.activate(kind: kind, context: context)
+        }
     }
 
     func activate(kind: String) async {
@@ -840,12 +874,15 @@ extension OnboardingAISetupModel {
         } ?? .unbound()
         self.pendingActivationOwner = activationOwner
         self.pendingActivationRequiresFreshActivation = true
+        let supersededWaitMs = max(
+            0,
+            (context.supersededAttemptDeadline?.timeIntervalSinceNow ?? 0) * 1000)
         // Activation can persist before the response reaches the app. Cover the
         // whole ambiguous window so relaunch can inspect the actual Gateway state.
         guard let activationDeadline = OnboardingSystemAgentResumeStore.markPending(
             routeIdentity: context.routeIdentity,
             activationOwner: activationOwner,
-            activationTimeoutMs: requestTimeoutMs,
+            activationTimeoutMs: requestTimeoutMs + supersededWaitMs,
             defaults: defaults)
         else {
             let failure = Self.transportFailure(
@@ -861,11 +898,11 @@ extension OnboardingAISetupModel {
             return
         }
         do {
-            let data = try await gateway.request(
-                method: "openclaw.setup.activate",
+            let data = try await self.requestActivation(
                 params: params,
                 timeoutMs: requestTimeoutMs,
-                ifCurrentServerLease: lease)
+                serverLease: lease,
+                context: context)
             let result = try JSONDecoder().decode(ActivateResult.self, from: data)
             guard self.isCurrentAttempt(context), !Task.isCancelled else { return }
             guard await self.gateway.isCurrentServerLease(lease) else {
@@ -950,6 +987,34 @@ extension OnboardingAISetupModel {
         }
     }
 
+    private func requestActivation(
+        params: [String: AnyCodable],
+        timeoutMs: Double,
+        serverLease: GatewayConnection.ServerLease,
+        context: AttemptContext) async throws -> Data
+    {
+        var retryDelayMs: UInt64 = 250
+        while true {
+            guard self.isCurrentAttempt(context), !Task.isCancelled else {
+                throw CancellationError()
+            }
+            do {
+                return try await self.gateway.request(
+                    method: "openclaw.setup.activate",
+                    params: params,
+                    timeoutMs: timeoutMs,
+                    ifCurrentServerLease: serverLease)
+            } catch {
+                guard let supersededAttemptDeadline = context.supersededAttemptDeadline,
+                      Date() < supersededAttemptDeadline,
+                      Self.activationAdmissionIsBusy(error)
+                else { throw error }
+                try await Task.sleep(nanoseconds: retryDelayMs * 1_000_000)
+                retryDelayMs = min(retryDelayMs * 2, 5000)
+            }
+        }
+    }
+
     private func exposeActivationFailure(_ failure: Failure, whenTerminal: Bool) {
         guard whenTerminal else { return }
         self.detectError = failure
@@ -963,15 +1028,11 @@ extension OnboardingAISetupModel {
         before: PersistedActivationState?,
         originalServerLease: GatewayConnection.ServerLease) async -> Bool
     {
-        let clock = ContinuousClock()
-        let deadline = clock.now.advanced(by: .seconds(30))
+        let deadline = ReconciliationDeadline(timeout: .seconds(45))
         var delayMs = 250
-        while clock.now < deadline {
+        while deadline.hasTimeRemaining {
             guard self.isCurrentAttempt(context), !Task.isCancelled else { return false }
-            let leaseTimeoutMs = Self.remainingMilliseconds(
-                until: deadline,
-                clock: clock,
-                cappedAt: 3000)
+            let leaseTimeoutMs = deadline.remainingMilliseconds(cappedAt: 3000)
             guard leaseTimeoutMs > 0 else { return false }
             if let replacementLease = try? await gateway.acquireServerLease(
                 ifSameRouteAs: originalServerLease,
@@ -983,18 +1044,12 @@ extension OnboardingAISetupModel {
                     activationOwner: activationOwner,
                     before: before,
                     serverLease: replacementLease,
-                    timeoutMs: Self.remainingMilliseconds(
-                        until: deadline,
-                        clock: clock,
-                        cappedAt: 10000))
+                    deadline: deadline)
             {
                 self.serverLease = replacementLease
                 return true
             }
-            let sleepMs = Self.remainingMilliseconds(
-                until: deadline,
-                clock: clock,
-                cappedAt: delayMs)
+            let sleepMs = deadline.remainingMilliseconds(cappedAt: delayMs)
             guard sleepMs > 0 else { return false }
             do {
                 try await Task.sleep(nanoseconds: UInt64(sleepMs) * 1_000_000)
@@ -1013,9 +1068,11 @@ extension OnboardingAISetupModel {
         activationOwner: OnboardingSystemAgentResumeStore.ActivationOwner,
         before: PersistedActivationState?,
         serverLease: GatewayConnection.ServerLease,
-        timeoutMs: Int) async -> Bool
+        deadline: ReconciliationDeadline) async -> Bool
     {
-        guard timeoutMs > 0,
+        let detectTimeoutMs = deadline.remainingMilliseconds(
+            cappedAt: Self.setupDetectionRequestTimeoutMs)
+        guard detectTimeoutMs > 0,
               self.isCurrentAttempt(context),
               !Task.isCancelled,
               OnboardingSystemAgentResumeStore.isOwned(
@@ -1028,7 +1085,7 @@ extension OnboardingAISetupModel {
         guard let detectData = try? await gateway.request(
             method: "openclaw.setup.detect",
             params: [:],
-            timeoutMs: Double(timeoutMs),
+            timeoutMs: Double(detectTimeoutMs),
             ifCurrentServerLease: serverLease),
             await gateway.isCurrentServerLease(serverLease),
             isCurrentAttempt(context),
@@ -1039,10 +1096,13 @@ extension OnboardingAISetupModel {
                 before: before,
                 after: detection.persistedActivationState)
         else { return false }
+        let verifyTimeoutMs = deadline.remainingMilliseconds(
+            cappedAt: Self.setupDetectionRequestTimeoutMs)
+        guard verifyTimeoutMs > 0 else { return false }
         guard let verifyData = try? await gateway.request(
             method: "openclaw.setup.verify",
             params: [:],
-            timeoutMs: Double(timeoutMs),
+            timeoutMs: Double(verifyTimeoutMs),
             ifCurrentServerLease: serverLease),
             await gateway.isCurrentServerLease(serverLease),
             isCurrentAttempt(context),
@@ -1358,7 +1418,7 @@ extension OnboardingAISetupModel {
         guard let data = try? await gateway.request(
             method: "openclaw.setup.detect",
             params: [:],
-            timeoutMs: 10000,
+            timeoutMs: Double(Self.setupDetectionRequestTimeoutMs),
             ifCurrentServerLease: lease),
             token == attemptToken,
             let result = try? JSONDecoder().decode(DetectResult.self, from: data),

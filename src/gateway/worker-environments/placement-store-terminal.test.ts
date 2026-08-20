@@ -7,11 +7,12 @@ import {
   openOpenClawStateDatabase,
   type OpenClawStateDatabase,
 } from "../../state/openclaw-state-db.js";
-import type { WorkerSessionPlacementIdentity } from "./placement-record.js";
+import type { WorkerSessionPlacementIdentity, WorkerSessionTurnClaim } from "./placement-record.js";
 import {
   createWorkerSessionPlacementStore,
   type WorkerSessionPlacementStore,
 } from "./placement-store.js";
+import { completeReclaimedWorkspaceTeardown } from "./placement-teardown.js";
 
 const SESSION: WorkerSessionPlacementIdentity = {
   sessionId: "session-placement-terminal",
@@ -105,15 +106,23 @@ describe("worker placement terminal persistence", () => {
   }
 
   it("records a clean terminal timestamp when reclaiming an accepted result", () => {
-    advanceToActive();
+    const active = advanceToActive();
     const { claim } = pendingResult();
-    expect(() => store.completeWorkspaceResultAndReleaseTurn(claim, { reclaim: true })).toThrow(
+    store.startWorkspaceResultDrain(claim);
+    expect(() => store.completeWorkspaceResultAndReleaseTurn(claim)).toThrow(
       "workspace result was not accepted",
     );
     store.updateWorkspaceBaseManifest({ claim, manifestRef: `sha256:${"e".repeat(64)}` });
     store.acceptWorkspaceResult(claim);
 
-    expect(store.completeWorkspaceResultAndReleaseTurn(claim, { reclaim: true })).toMatchObject({
+    expect(
+      completeReclaimedWorkspaceTeardown({
+        placements: store,
+        turnClaim: claim,
+        environmentId: active.environmentId,
+        ownerEpoch: active.activeOwnerEpoch,
+      }),
+    ).toMatchObject({
       state: "reclaimed",
       turnClaim: null,
       terminalReason: null,
@@ -124,17 +133,29 @@ describe("worker placement terminal persistence", () => {
 
   it("records a clean terminal timestamp for an idle destroyed-worker reclaim", () => {
     const active = advanceToActive();
+    const draining = store.startDrain({
+      sessionId: active.sessionId,
+      environmentId: active.environmentId,
+      ownerEpoch: active.activeOwnerEpoch,
+      expectedGeneration: active.generation,
+    });
+    const reconciling = store.startReconcile({
+      sessionId: active.sessionId,
+      environmentId: active.environmentId,
+      ownerEpoch: active.activeOwnerEpoch,
+      expectedGeneration: draining.generation,
+    });
 
     expect(
-      store.finishReclaim({
+      store.transition({
         sessionId: active.sessionId,
-        environmentId: active.environmentId,
-        ownerEpoch: active.activeOwnerEpoch,
-        expectedGeneration: active.generation,
+        from: "reconciling",
+        to: "reclaimed",
+        expectedGeneration: reconciling.generation,
       }),
     ).toMatchObject({
       state: "reclaimed",
-      generation: active.generation + 1,
+      generation: active.generation + 3,
       turnClaim: null,
       terminalReason: null,
       terminalAtMs: 1_000,
@@ -143,14 +164,18 @@ describe("worker placement terminal persistence", () => {
 
   it("atomically fails a pending result and preserves its bounded reason across restart", () => {
     advanceToActive();
-    const { active, pending } = pendingResult();
+    const { claim, pending } = pendingResult();
+    const closedClaims: WorkerSessionTurnClaim[] = [];
+    const unregister = store.registerTurnClaimClosedHandler((closedClaim) => {
+      closedClaims.push(closedClaim);
+    });
     nowMs = 2_000;
     const disappearance = `cloud worker disappeared: ${"provider-detail ".repeat(100)}`;
 
     const failed = store.failWorkspaceResultAndReleaseTurn(pending, new Error(disappearance));
     expect(failed).toMatchObject({
       state: "failed",
-      generation: active.generation + 3,
+      generation: claim.placementGeneration + 3,
       turnClaim: null,
       terminalAtMs: 2_000,
     });
@@ -158,6 +183,8 @@ describe("worker placement terminal persistence", () => {
     expect(failed.terminalReason).toMatch(/^cloud worker disappeared: provider-detail/u);
     expect(failed.recoveryError).toBe(failed.terminalReason);
     expect(store.listPendingWorkspaceResults()).toEqual([]);
+    expect(closedClaims).toEqual([claim]);
+    unregister();
 
     closeOpenClawStateDatabaseForTest();
     database = openOpenClawStateDatabase({ env: { OPENCLAW_STATE_DIR: root } });
@@ -165,6 +192,46 @@ describe("worker placement terminal persistence", () => {
     const reopened = store.get(SESSION.sessionId);
     expect(reopened).toMatchObject({ state: "failed", terminalAtMs: 2_000 });
     expect(reopened?.terminalReason).toBe(failed.terminalReason);
+  });
+
+  it("does not fail a pending result while its session operation is running", () => {
+    advanceToActive();
+    const { claim, pending } = pendingResult();
+    const binding = claim;
+    store.authorizeWorkerTurnTools(claim, ["sessions_send"]);
+    expect(
+      store.beginWorkerSessionToolOperation({
+        claim: binding,
+        toolName: "sessions_send",
+        toolCallId: "call-pending-send",
+        requestDigest: "digest-pending-send",
+      }),
+    ).toMatchObject({ kind: "execute" });
+
+    expect(() =>
+      store.failWorkspaceResultAndReleaseTurn(pending, new Error("worker disappeared")),
+    ).toThrow("running worker session operation");
+    expect(store.get(claim.sessionId)).toMatchObject({
+      state: "active",
+      turnClaim: { claimId: claim.claimId },
+    });
+    expect(store.listPendingWorkspaceResults()).toMatchObject([
+      { sessionId: claim.sessionId, claimId: claim.claimId },
+    ]);
+
+    expect(
+      store.completeWorkerSessionToolOperation({
+        sourceSessionId: claim.sessionId,
+        sourceClaimId: claim.claimId,
+        toolCallId: "call-pending-send",
+        requestDigest: "digest-pending-send",
+        resultJson: '{"status":"ok"}',
+      }),
+    ).toBe(true);
+    expect(
+      store.failWorkspaceResultAndReleaseTurn(pending, new Error("worker disappeared")),
+    ).toMatchObject({ state: "failed", turnClaim: null });
+    expect(store.listPendingWorkspaceResults()).toEqual([]);
   });
 
   it("does not leak terminal diagnostics between sessions sharing an environment", () => {

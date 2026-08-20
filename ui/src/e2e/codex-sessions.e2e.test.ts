@@ -220,7 +220,16 @@ suite.define(() => {
       ]);
       expect(liveRowsBox).not.toBeNull();
       expect(catalogBox).not.toBeNull();
-      expect(Math.round(catalogBox!.y - (liveRowsBox!.y + liveRowsBox!.height))).toBe(10);
+      // Read the rhythm from the token instead of restating it: the guard is
+      // that catalogs are a separate group, not that the gap is any one number.
+      const groupGap = await page.evaluate(() => {
+        const sidebar = document.querySelector(".sidebar");
+        return sidebar
+          ? Number.parseInt(getComputedStyle(sidebar).getPropertyValue("--sidebar-group-gap"), 10)
+          : Number.NaN;
+      });
+      expect(groupGap).toBeGreaterThan(0);
+      expect(Math.round(catalogBox!.y - (liveRowsBox!.y + liveRowsBox!.height))).toBe(groupGap);
       if (captureUiProofEnabled) {
         await mkdir(uiProofArtifactDir, { recursive: true });
         await sessionGroups.screenshot({
@@ -470,6 +479,7 @@ suite.define(() => {
         '[data-session-section="ungrouped"] .sidebar-recent-session, [data-session-section="catalog:codex"] .sidebar-recent-session--catalog-project-child',
       );
       await expect.poll(() => threadRows.count()).toBe(4);
+      expect(await threadRows.locator(".sidebar-recent-session__link[title]").count()).toBe(0);
       const threadRowMetrics = await threadRows.evaluateAll((rows) =>
         rows.map((row) => {
           const link = row.querySelector(".sidebar-recent-session__link");
@@ -483,39 +493,35 @@ suite.define(() => {
             nameFontSize: nameStyle?.fontSize ?? "",
             paddingBottom: linkStyle?.paddingBottom ?? "",
             paddingTop: linkStyle?.paddingTop ?? "",
+            singleLine: row.classList.contains("sidebar-recent-session--single-line"),
           };
         }),
       );
-      expect(threadRowMetrics).toEqual([
-        {
-          height: 30,
+      expect(threadRowMetrics).toHaveLength(4);
+      // Gateway threads and native catalog children must stay density-identical, but a
+      // row with no preview text collapses to one line. Assert uniformity per shape, so
+      // the two sources drifting apart still fails while the collapse stays legal.
+      const singleLineHeights = new Set(
+        threadRowMetrics.filter((metric) => metric.singleLine).map((metric) => metric.height),
+      );
+      const twoLineHeights = new Set(
+        threadRowMetrics.filter((metric) => !metric.singleLine).map((metric) => metric.height),
+      );
+      expect(singleLineHeights.size).toBe(1);
+      expect(twoLineHeights.size).toBe(1);
+      const [collapsedHeight] = [...singleLineHeights];
+      const [expandedHeight] = [...twoLineHeights];
+      // Collapsed rows sit on the 30px min-height floor; renderer sub-pixels vary.
+      expect(collapsedHeight).toBeCloseTo(30, 1);
+      expect(expandedHeight).toBeGreaterThan(collapsedHeight!);
+      for (const metric of threadRowMetrics) {
+        expect(metric).toMatchObject({
           minHeight: "30px",
           nameFontSize: "13px",
-          paddingBottom: "3px",
-          paddingTop: "3px",
-        },
-        {
-          height: 30,
-          minHeight: "30px",
-          nameFontSize: "13px",
-          paddingBottom: "3px",
-          paddingTop: "3px",
-        },
-        {
-          height: 30,
-          minHeight: "30px",
-          nameFontSize: "13px",
-          paddingBottom: "3px",
-          paddingTop: "3px",
-        },
-        {
-          height: 30,
-          minHeight: "30px",
-          nameFontSize: "13px",
-          paddingBottom: "3px",
-          paddingTop: "3px",
-        },
-      ]);
+          paddingBottom: "4px",
+          paddingTop: "4px",
+        });
+      }
       const projectLabelTone = await openclawProject
         .locator(".sidebar-session-catalog-project__label")
         .evaluate((label) => {
@@ -958,8 +964,23 @@ suite.define(() => {
     await page.goto(`${suite.server.baseUrl}chat`);
     await expandCodingSection(page);
     await page.getByText("Release checklist", { exact: true }).click();
-    await expect.poll(() => page.getByText("prepare release", { exact: true }).count()).toBe(1);
-    const composer = page.locator(".agent-chat__composer-combobox > textarea");
+    const catalogPane = page
+      .locator("openclaw-chat-pane.chat-pane-cache__pane--visible")
+      .filter({ hasText: "prepare release" });
+    await catalogPane.getByText("prepare release", { exact: true }).waitFor();
+    expect(
+      (await gateway.getRequests("sessions.catalog.list")).every(
+        (request) => (request.params as { agentId?: string } | undefined)?.agentId === "main",
+      ),
+    ).toBe(true);
+    const read = await gateway.waitForRequest("sessions.catalog.read");
+    expect(read.params).toMatchObject({
+      agentId: "main",
+      catalogId: "codex",
+      hostId: "gateway:local",
+      threadId: "thread-1",
+    });
+    const composer = catalogPane.locator(".agent-chat__composer-combobox > textarea");
     await composer.fill("continue with the final checks");
     await gateway.setMethodResponse("sessions.list", {
       count: 1,
@@ -986,6 +1007,7 @@ suite.define(() => {
     await composer.press("Enter");
     const continued = await gateway.waitForRequest("sessions.catalog.continue");
     expect(continued.params).toEqual({
+      agentId: "main",
       catalogId: "codex",
       hostId: "gateway:local",
       threadId: "thread-1",

@@ -12,6 +12,7 @@ import {
   generateSummary,
   getLastAssistantUsage,
   prepareCompaction,
+  shouldCompact,
 } from "./compaction.js";
 import { createFileOps } from "./utils.js";
 
@@ -81,6 +82,21 @@ function createProjectedEntry(
     ? { ...common, type, customType: "test", content, display: true }
     : { ...common, type, fromId: common.parentId ?? common.id, summary: content };
 }
+
+describe("shouldCompact", () => {
+  it.each([0, -1, Number.NaN, Number.POSITIVE_INFINITY])(
+    "skips an invalid context window of %s",
+    (contextWindow) => {
+      expect(
+        shouldCompact(1, contextWindow, {
+          enabled: true,
+          reserveTokens: 16_384,
+          keepRecentTokens: 20_000,
+        }),
+      ).toBe(false);
+    },
+  );
+});
 
 describe("calculateContextTokens", () => {
   it("prefers the final-iteration context snapshot over aggregate billing usage", () => {
@@ -237,6 +253,27 @@ describe("calculateContextTokens", () => {
     const entries = messages.map(createMessageEntry);
 
     expect(getLastAssistantUsage(entries)).toBe(validUsage);
+    expect(estimateContextTokens(messages)).toMatchObject({
+      usageTokens: 20,
+      lastUsageIndex: 0,
+    });
+    expect(estimateContextTokens(messages).trailingTokens).toBeGreaterThan(0);
+  });
+
+  it("scans past a sparse assistant row to retain older valid usage", () => {
+    const validUsage = createUsage(20);
+    const sparseAssistant = {
+      role: "assistant",
+      content: [{ type: "text", text: "seeded without provider usage" }],
+      api: "test-api",
+      provider: "test-provider",
+      model: "test-model",
+      stopReason: "stop",
+      timestamp: 2,
+    } as AgentMessage;
+    const messages = [createAssistant("complete", validUsage, 1), sparseAssistant];
+
+    expect(getLastAssistantUsage(messages.map(createMessageEntry))).toBe(validUsage);
     expect(estimateContextTokens(messages)).toMatchObject({
       usageTokens: 20,
       lastUsageIndex: 0,
@@ -610,6 +647,53 @@ describe("session-entry compaction budgeting", () => {
 });
 
 describe("generateSummary thinking options", () => {
+  it("consumes the decorated stream before reading its result", async () => {
+    const model: Model = {
+      id: "summary-model",
+      name: "Summary Model",
+      api: "test-api",
+      provider: "test-provider",
+      baseUrl: "https://example.test",
+      reasoning: false,
+      input: ["text"],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      contextWindow: 100_000,
+      maxTokens: 8_000,
+    };
+    let consumed = false;
+    const streamFn = vi.fn<StreamFn>(() => ({
+      [Symbol.asyncIterator]() {
+        return {
+          async next() {
+            consumed = true;
+            return { done: true as const, value: undefined };
+          },
+        };
+      },
+      async result() {
+        if (!consumed) {
+          throw new Error("stream result read before iteration");
+        }
+        return createAssistant("summary", createUsage(1), 1);
+      },
+    }));
+
+    await generateSummary(
+      [{ role: "user", content: "hello", timestamp: 1 }],
+      model,
+      1_000,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      streamFn,
+    );
+
+    expect(consumed).toBe(true);
+  });
+
   it("maps explicit Fable off to low effort for compaction", async () => {
     const model: Model = {
       id: "production-fable",

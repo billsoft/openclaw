@@ -7,12 +7,12 @@ import {
   fetchGitHubApi,
   GITHUB_API_ORIGIN,
   GITHUB_REQUEST_TIMEOUT_MS,
-  githubApiToken,
   isRecord,
   optionalNumber,
-  optionalString,
+  readOptionalGitHubString,
   readBoundedResponse,
   readGitHubJsonResponse,
+  resolveGitHubApiCredentialScope,
   requiredString,
   withOptionalGitHubAuth,
 } from "./control-ui-github-api.js";
@@ -159,19 +159,19 @@ function parseGitHubResponse(
       ...target,
       additions: optionalNumber(value, "additions"),
       changedFiles: optionalNumber(value, "changed_files"),
-      closedAt: optionalString(value, "closed_at"),
+      closedAt: readOptionalGitHubString(value, "closed_at"),
       comments: optionalNumber(value, "comments"),
       createdAt: requiredString(value, "created_at"),
       deletions: optionalNumber(value, "deletions"),
       draft: typeof value.draft === "boolean" ? value.draft : undefined,
-      login: optionalString(user, "login") ?? "ghost",
-      mergedAt: optionalString(value, "merged_at"),
+      login: readOptionalGitHubString(user, "login") ?? "ghost",
+      mergedAt: readOptionalGitHubString(value, "merged_at"),
       state: requiredString(value, "state"),
-      stateReason: optionalString(value, "state_reason"),
+      stateReason: readOptionalGitHubString(value, "state_reason"),
       title: requiredString(value, "title"),
       updatedAt: requiredString(value, "updated_at"),
     },
-    avatarUrl: optionalString(user, "avatar_url"),
+    avatarUrl: readOptionalGitHubString(user, "avatar_url"),
   };
 }
 
@@ -270,15 +270,16 @@ async function fetchPreview(
   return avatarDataUrl ? { ...preview, avatarDataUrl } : preview;
 }
 
-function cacheKey(target: ControlUiGitHubPreviewTarget): string {
-  return `${target.kind}:${target.owner.toLowerCase()}/${target.repo.toLowerCase()}#${target.number}`;
+function cacheKey(target: ControlUiGitHubPreviewTarget, credentialScope: string): string {
+  return `${target.kind}:${target.owner.toLowerCase()}/${target.repo.toLowerCase()}#${target.number}\0${credentialScope}`;
 }
 
 export function loadControlUiGitHubPreview(
   target: ControlUiGitHubPreviewTarget,
   fetchImpl: typeof fetch = fetch,
 ): Promise<ControlUiGitHubPreview> {
-  const key = cacheKey(target);
+  const { token, cacheScope } = resolveGitHubApiCredentialScope();
+  const key = cacheKey(target, cacheScope);
   const now = Date.now();
   const cached = previewCache.get(key);
   if (cached && cached.expiresAt > now) {
@@ -290,7 +291,6 @@ export function loadControlUiGitHubPreview(
     previewCache.delete(key);
   }
 
-  const token = githubApiToken();
   const successCacheMs = token ? AUTHENTICATED_SUCCESS_CACHE_MS : ANONYMOUS_SUCCESS_CACHE_MS;
   const entry: CacheEntry<ControlUiGitHubPreview> = {
     expiresAt: now + successCacheMs,

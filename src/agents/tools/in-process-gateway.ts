@@ -1,8 +1,14 @@
+import type { AgentRuntimeIdentity } from "../../gateway/agent-runtime-identity-token.js";
 /** In-process Gateway calls for built-in agent tools. */
 import type { CallGatewayOptions } from "../../gateway/call.js";
+import { withInProcessAgentRuntimeIdentity } from "../../gateway/in-process-agent-runtime-identity.js";
 import { resolveLeastPrivilegeOperatorScopesForMethod } from "../../gateway/method-scopes.js";
 import type { TrustedSessionCreation } from "../../gateway/server-methods/session-creation-provenance.js";
-import type { GatewayRequestContext } from "../../gateway/server-methods/types.js";
+import type {
+  GatewayAgentRunTaskOwner,
+  GatewayRequestContext,
+  TrustedAgentToolCaller,
+} from "../../gateway/server-methods/types.js";
 import {
   dispatchGatewayMethodInProcess,
   getInProcessGatewayRequestContext,
@@ -25,8 +31,27 @@ type AgentToolGatewayRequest = Pick<
   | "onSignalAbort"
   | "params"
   | "signal"
+  | "scopes"
   | "timeoutMs"
->;
+> & {
+  agentRunTracking?: GatewayAgentRunTaskOwner;
+  agentToolCaller?: TrustedAgentToolCaller;
+};
+
+const agentToolGatewayRuntimeIdentities = new WeakMap<object, AgentRuntimeIdentity>();
+
+/** Carry trusted runtime identity without making it enumerable or transportable. */
+export function withAgentToolGatewayRuntimeIdentity<T extends object>(
+  request: T,
+  identity: AgentRuntimeIdentity | undefined,
+): T {
+  if (!identity) {
+    return request;
+  }
+  const carried = { ...request };
+  agentToolGatewayRuntimeIdentities.set(carried, identity);
+  return carried;
+}
 
 export type AgentToolGatewayRequestCaller = <T = Record<string, unknown>>(
   request: AgentToolGatewayRequest,
@@ -50,34 +75,47 @@ export function getInProcessGatewayToolContext(): GatewayRequestContext | undefi
 export const callAgentToolGatewayRequest: AgentToolGatewayRequestCaller = async <T>(
   request: AgentToolGatewayRequest,
 ): Promise<T> => {
+  const runtimeIdentity = agentToolGatewayRuntimeIdentities.get(request);
   if (!hasInProcessGatewayContext()) {
+    if (runtimeIdentity) {
+      throw new Error("trusted agent runtime identity requires in-process Gateway dispatch");
+    }
     const { callGateway } = await import("../../gateway/call.js");
-    return await callGateway<T>(request);
+    const {
+      agentRunTracking: _agentRunTracking,
+      agentToolCaller: _agentToolCaller,
+      ...wireRequest
+    } = request;
+    return await callGateway<T>(wireRequest);
   }
-  const scopes = resolveLeastPrivilegeOperatorScopesForMethod(request.method, request.params);
+  const scopes =
+    request.scopes ?? resolveLeastPrivilegeOperatorScopesForMethod(request.method, request.params);
   const timeoutMs =
     request.timeoutMs === null
       ? undefined
       : (request.timeoutMs ?? DEFAULT_IN_PROCESS_GATEWAY_REQUEST_TIMEOUT_MS);
+  const dispatchOptions = {
+    forceSyntheticClient: true,
+    ...(request.agentRunTracking ? { agentRunTracking: request.agentRunTracking } : {}),
+    ...(request.agentToolCaller ? { agentToolCaller: request.agentToolCaller } : {}),
+    syntheticScopes: scopes,
+    ...(request.expectFinal !== undefined ? { expectFinal: request.expectFinal } : {}),
+    ...(request.onAccepted ? { onAccepted: request.onAccepted } : {}),
+    ...(request.onSignalAbort
+      ? {
+          onSignalAbort: () =>
+            request.onSignalAbort?.((method, params, options) =>
+              callAgentToolGatewayRequest({ method, params, ...options }),
+            ),
+        }
+      : {}),
+    ...(request.signal ? { signal: request.signal } : {}),
+    ...(timeoutMs !== undefined ? { timeoutMs } : {}),
+  };
   return await dispatchGatewayMethodInProcess<T>(
     request.method,
     (request.params ?? {}) as Record<string, unknown>,
-    {
-      forceSyntheticClient: true,
-      syntheticScopes: scopes,
-      ...(request.expectFinal !== undefined ? { expectFinal: request.expectFinal } : {}),
-      ...(request.onAccepted ? { onAccepted: request.onAccepted } : {}),
-      ...(request.onSignalAbort
-        ? {
-            onSignalAbort: () =>
-              request.onSignalAbort?.((method, params, options) =>
-                callAgentToolGatewayRequest({ method, params, ...options }),
-              ),
-          }
-        : {}),
-      ...(request.signal ? { signal: request.signal } : {}),
-      ...(timeoutMs !== undefined ? { timeoutMs } : {}),
-    },
+    withInProcessAgentRuntimeIdentity(dispatchOptions, runtimeIdentity),
   );
 };
 
@@ -99,6 +137,7 @@ export async function callInProcessGatewayToolWithCreation<T = Record<string, un
   method: string,
   params: Record<string, unknown>,
   creation: TrustedSessionCreation,
+  options: { signal?: AbortSignal; timeoutMs?: number | null } = {},
 ): Promise<T> {
   const scopes = resolveLeastPrivilegeOperatorScopesForMethod(method, params);
   if (hasInProcessGatewayContext()) {
@@ -106,12 +145,20 @@ export async function callInProcessGatewayToolWithCreation<T = Record<string, un
       forceSyntheticClient: true,
       sessionCreation: creation,
       syntheticScopes: scopes,
+      ...(options.signal ? { signal: options.signal } : {}),
+      ...(options.timeoutMs !== undefined && options.timeoutMs !== null
+        ? { timeoutMs: options.timeoutMs }
+        : {}),
     });
   }
   // The fallback is a real local Gateway request. Carry spawn policy only in
   // the signed agent-runtime identity token, never in model-authored params.
   if (creation.via !== "spawn" || !creation.inheritedToolPolicy) {
-    return await callGatewayTool<T>(method, {}, params, { scopes });
+    return await callGatewayTool<T>(method, {}, params, {
+      scopes,
+      ...(options.signal ? { signal: options.signal } : {}),
+      ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
+    });
   }
   return await runWithGatewaySessionSpawnContext(
     {
@@ -124,6 +171,8 @@ export async function callInProcessGatewayToolWithCreation<T = Record<string, un
       callGatewayTool<T>(method, {}, params, {
         scopes,
         requireAgentRuntimeIdentity: true,
+        ...(options.signal ? { signal: options.signal } : {}),
+        ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
       }),
   );
 }

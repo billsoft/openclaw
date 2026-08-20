@@ -1,10 +1,19 @@
 /** Final persistence, telemetry, and delivery for an isolated cron run. */
+import {
+  asNonNegativeFiniteNumber,
+  asPositiveFiniteNumber as resolvePositiveContextTokens,
+} from "@openclaw/normalization-core/number-coercion";
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
 import { hasAcceptedSessionSpawn } from "../../agents/accepted-session-spawn.js";
+import { resolveAuthoredModelContextTokens } from "../../agents/context-resolution.js";
 import { hasCommittedMessagingToolDeliveryEvidence } from "../../agents/embedded-agent-runner/delivery-evidence.js";
 import { deriveContextPromptTokens } from "../../agents/usage.js";
 import { isSilentReplyPayloadText } from "../../auto-reply/tokens.js";
 import { SESSION_TOTAL_TOKENS_VERSION } from "../../config/sessions.js";
+import {
+  resolveProjectedSessionContextTokens,
+  resolveTrustedSessionContextTokens,
+} from "../../config/sessions/context-token-provenance.js";
 import { emitTrustedDiagnosticEvent, isDiagnosticsEnabled } from "../../infra/diagnostic-events.js";
 import {
   createChildDiagnosticTraceContext,
@@ -12,7 +21,6 @@ import {
 } from "../../infra/diagnostic-trace-context.js";
 import { resolveSourceDeliveryOutcome } from "../../infra/outbound/source-delivery-plan.js";
 import { createLazyImportLoader } from "../../shared/lazy-promise.js";
-import { resolveNonNegativeNumber } from "../../shared/number-coercion.js";
 import {
   createCronRunDiagnosticsFromAgentResult,
   createCronRunDiagnosticsFromError,
@@ -23,13 +31,16 @@ import { resolveCronChannelOutputPolicy } from "./channel-output-policy.js";
 import { resolveCronPayloadOutcome } from "./helpers.js";
 import { buildCronDeliveryTrace, loadCronDeliveryRuntime } from "./run-delivery-trace.js";
 import type { PreparedCronRunContext } from "./run-prepare.js";
-import { adoptCronRunSessionMetadata } from "./run-session-state.js";
+import {
+  adoptCronRunSessionMetadata,
+  setCronSessionAgentHarnessId,
+  setCronSessionRuntimeModel,
+} from "./run-session-state.js";
 import {
   DEFAULT_CONTEXT_TOKENS,
   deriveSessionTotalTokens,
   hasNonzeroUsage,
   isCliProvider,
-  setSessionRuntimeModel,
 } from "./run.runtime.js";
 import type { RunCronAgentTurnResult } from "./run.types.js";
 import { cleanupCronRunSessionAfterRun } from "./session-cleanup.js";
@@ -38,10 +49,6 @@ type CronExecutionRuntime = typeof import("./run-executor.runtime.js");
 type CronExecutionResult = Awaited<ReturnType<CronExecutionRuntime["executeCronRun"]>>;
 
 const cronContextRuntimeLoader = createLazyImportLoader(() => import("./run-context.runtime.js"));
-
-function resolvePositiveContextTokens(value: unknown): number | undefined {
-  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : undefined;
-}
 
 export async function finalizeCronRun(params: {
   prepared: PreparedCronRunContext;
@@ -92,20 +99,62 @@ export async function finalizeCronRun(params: {
     finalRunResult.meta?.agentMeta?.provider ??
     execution.fallbackProvider ??
     execution.liveSelection.provider;
-  const contextTokens =
-    resolvePositiveContextTokens(prepared.agentCfg?.contextTokens) ??
-    (await cronContextRuntimeLoader.load()).lookupContextTokens(modelUsed, {
-      allowAsyncLoad: false,
-    }) ??
-    resolvePositiveContextTokens(prepared.cronSession.sessionEntry.contextTokens) ??
-    DEFAULT_CONTEXT_TOKENS;
+  const runtimeContextTokens = resolvePositiveContextTokens(
+    finalRunResult.meta?.agentMeta?.contextTokens,
+  );
+  const modelContextTokens = (await cronContextRuntimeLoader.load()).resolveContextTokensForModel({
+    cfg: prepared.cfgWithAgentDefaults,
+    provider: providerUsed,
+    model: modelUsed,
+    allowAsyncLoad: false,
+  });
+  const agentHarnessId = normalizeOptionalString(finalRunResult.meta?.agentMeta?.agentHarnessId);
+  const authoredContextTokens = resolveAuthoredModelContextTokens({
+    cfg: prepared.cfgWithAgentDefaults,
+    provider: providerUsed,
+    model: modelUsed,
+  });
+  const retainedRuntimeContextTokens = resolveTrustedSessionContextTokens({
+    entry: prepared.cronSession.sessionEntry,
+    provider: providerUsed,
+    model: modelUsed,
+    agentHarnessId,
+  });
+  const projectedContextTokens = resolveProjectedSessionContextTokens({
+    entry: prepared.cronSession.sessionEntry,
+    provider: providerUsed,
+    model: modelUsed,
+    agentHarnessId,
+    resolvedContextTokens: modelContextTokens,
+    authoredContextTokens,
+  });
+  const contextTokens = runtimeContextTokens ?? projectedContextTokens ?? DEFAULT_CONTEXT_TOKENS;
+  // Preserve persisted provenance only when the projector selected that owner;
+  // a current/authored clamp stays resolved so removed caps cannot stick.
+  const projectedUsesPersistedContext =
+    retainedRuntimeContextTokens !== undefined &&
+    (prepared.cronSession.sessionEntry.modelSelectionLocked === true ||
+      (authoredContextTokens === undefined &&
+        projectedContextTokens === retainedRuntimeContextTokens));
+  const contextTokensSource =
+    runtimeContextTokens !== undefined
+      ? (finalRunResult.meta?.agentMeta?.contextTokensSource ?? "resolved")
+      : projectedUsesPersistedContext
+        ? prepared.cronSession.sessionEntry.contextTokensSource
+        : "resolved";
 
   if (!params.isAborted()) {
-    setSessionRuntimeModel(prepared.cronSession.sessionEntry, {
+    setCronSessionRuntimeModel({
+      entry: prepared.cronSession.sessionEntry,
       provider: providerUsed,
       model: modelUsed,
     });
+    setCronSessionAgentHarnessId({
+      entry: prepared.cronSession.sessionEntry,
+      agentHarnessId,
+    });
     prepared.cronSession.sessionEntry.contextTokens = contextTokens;
+    prepared.cronSession.sessionEntry.contextTokensSource = contextTokensSource;
     if (isCliProvider(providerUsed, prepared.cfgWithAgentDefaults)) {
       const cliSessionBinding = finalRunResult.meta?.agentMeta?.cliSessionBinding;
       const cliSessionId = finalRunResult.meta?.agentMeta?.sessionId?.trim();
@@ -142,7 +191,7 @@ export async function finalizeCronRun(params: {
       model: modelUsed,
       config: prepared.cfgWithAgentDefaults,
     });
-    const runEstimatedCostUsd = resolveNonNegativeNumber(
+    const runEstimatedCostUsd = asNonNegativeFiniteNumber(
       estimateUsageCost({ usage, cost: costConfig }),
     );
     prepared.cronSession.sessionEntry.inputTokens = input;
@@ -199,7 +248,7 @@ export async function finalizeCronRun(params: {
         diagnosticUsage?.output !== undefined ||
         diagnosticUsage?.cacheRead !== undefined ||
         diagnosticUsage?.cacheWrite !== undefined;
-      const diagnosticEstimatedCostUsd = resolveNonNegativeNumber(
+      const diagnosticEstimatedCostUsd = asNonNegativeFiniteNumber(
         estimateUsageCost({ usage: diagnosticUsage, cost: costConfig }),
       );
       const contextUsedTokens = deriveContextPromptTokens({

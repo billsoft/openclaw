@@ -1,6 +1,5 @@
 import { html, nothing } from "lit";
 import { icons } from "../../../components/icons.ts";
-import type { ImageLightboxItem } from "../../../components/image-lightbox.ts";
 import { t } from "../../../i18n/index.ts";
 import "./chat-audio-player.ts";
 import "./chat-video-player.ts";
@@ -9,8 +8,6 @@ import {
   ASSISTANT_ATTACHMENT_MEDIA_TICKET_MAX_REFRESH_RETRIES,
   ASSISTANT_ATTACHMENT_MEDIA_TICKET_REFRESH_SKEW_MS,
   ASSISTANT_ATTACHMENT_UNAVAILABLE_RETRY_MS,
-  bumpAssistantAttachmentAvailabilityRenderVersion,
-  getAssistantAttachmentAvailabilityRenderVersion,
   isManagedOutgoingMediaSource,
   managedAttachmentRefreshDelayMs,
   resolveAssistantAttachmentAvailability,
@@ -36,9 +33,8 @@ import {
   type AttachmentItem,
   type ArtifactDownloadResolver,
   type ChatMediaResource,
+  type ImageRenderOptions,
 } from "./chat-message-media.ts";
-
-export { getAssistantAttachmentAvailabilityRenderVersion };
 
 function retainManagedAttachmentUntilExpiry(
   resource: ChatMediaResource<ManagedAttachmentAvailability>,
@@ -66,7 +62,6 @@ function setManagedAttachmentAvailability(
     return;
   }
   resource.value = availability;
-  bumpAssistantAttachmentAvailabilityRenderVersion();
   const refreshAt =
     availability.status === "checking"
       ? availability.refreshAfter
@@ -86,7 +81,6 @@ function setManagedAttachmentAvailability(
       resource.retryAttempted = true;
       resource.value = undefined;
     }
-    bumpAssistantAttachmentAvailabilityRenderVersion();
     notifyChatMediaResourceSubscribers(resource);
   });
 }
@@ -321,25 +315,28 @@ function resolveManagedAttachmentAvailability(
 
 export function renderAssistantAttachments(
   attachments: AttachmentItem[],
-  localMediaPreviewRoots: readonly string[],
-  basePath?: string,
-  authToken?: string | null,
-  onRequestUpdate?: () => void,
+  options: ImageRenderOptions,
   onAssistantAttachmentLoaded?: () => void,
-  onRequestOpenImage?: () => number,
-  onOpenImage?: (item: ImageLightboxItem, requestVersion?: number) => void,
-  resolveArtifactDownload?: ArtifactDownloadResolver,
 ) {
   if (attachments.length === 0) {
     return nothing;
   }
+  const {
+    localMediaPreviewRoots = [],
+    resourceBasePath,
+    authToken,
+    onRequestUpdate,
+    onRequestOpenImage,
+    onOpenImage,
+    resolveArtifactDownload,
+  } = options;
   return html`
     <div class="chat-assistant-attachments">
       ${attachments.map(({ attachment }) => {
         const assistantAvailability = resolveAssistantAttachmentAvailability(
           attachment.url,
           localMediaPreviewRoots,
-          basePath,
+          resourceBasePath,
           authToken,
           onRequestUpdate,
         );
@@ -365,7 +362,7 @@ export function renderAssistantAttachments(
             ? isLocalAssistantAttachmentSource(attachment.url)
               ? buildAssistantAttachmentUrl(
                   attachment.url,
-                  basePath,
+                  resourceBasePath,
                   assistantAvailability.mediaTicket,
                 )
               : managedAvailability.url

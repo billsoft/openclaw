@@ -304,6 +304,20 @@ private func actionableDetectedSetupResponse(id: String) -> Data {
     return Data(response.utf8)
 }
 
+private func selectableCandidatesDetectedSetupResponse(id: String) -> Data {
+    Data(
+        """
+        {"type":"res","id":"\(id)","ok":true,"payload":{
+          "candidates":[
+            {"kind":"codex-cli","label":"Codex CLI","detail":"installed",
+             "modelRef":"openai/gpt-5.5","recommended":false,"credentials":true},
+            {"kind":"claude-cli","label":"Claude Code","detail":"installed",
+             "modelRef":"claude-cli/claude-opus-4-8","recommended":false,"credentials":true}],
+          "manualProviders":[],"workspace":"/tmp/openclaw-workspace",
+          "configuredModel":null,"setupComplete":false}}
+        """.utf8)
+}
+
 private func persistedDetectedSetupResponse(
     id: String,
     configuredModel: String = "openai/gpt-5.5") -> Data
@@ -724,8 +738,19 @@ private func rejectedSetupVerificationResponse(id: String) -> Data {
     Data(#"{"type":"res","id":"\#(id)","ok":true,"payload":{"ok":false,"status":"auth","error":"expired login"}}"#.utf8)
 }
 
+private func unconfiguredSetupVerificationResponse(id: String) -> Data {
+    Data(
+        #"{"type":"res","id":"\#(id)","ok":true,"payload":{"ok":false,"status":"unavailable","error":"No agent model is configured."}}"#.utf8)
+}
+
 private func unavailableGatewayResponse(id: String) -> Data {
     Data(#"{"type":"res","id":"\#(id)","ok":false,"error":{"code":"UNAVAILABLE","message":"temporary failure"}}"#.utf8)
+}
+
+private func setupAdmissionBusyResponse(id: String) -> Data {
+    Data(
+        #"{"type":"res","id":"\#(id)","ok":false,"error":{"code":"UNAVAILABLE","message":"OpenClaw setup is already in progress; try again when it finishes.","retryable":true}}"#
+            .utf8)
 }
 
 @Suite(.serialized)
@@ -792,6 +817,16 @@ struct OnboardingAISetupTests {
 
     @Test func `provider auth transport outlives device code windows`() {
         #expect(OnboardingAISetupModel.providerAuthRequestTimeoutMs > 15 * 60 * 1000)
+    }
+
+    @Test func `reconciliation deadline recomputes each RPC budget`() async throws {
+        let deadline = OnboardingAISetupModel.ReconciliationDeadline(timeout: .seconds(2))
+        let detectionBudget = deadline.remainingMilliseconds(cappedAt: 10000)
+
+        try await Task.sleep(nanoseconds: 50_000_000)
+
+        let verificationBudget = deadline.remainingMilliseconds(cappedAt: 10000)
+        #expect(verificationBudget < detectionBudget)
     }
 
     @Test func `prepare choices use wire presentation and hide usable local models`() {
@@ -1422,51 +1457,6 @@ struct OnboardingAISetupTests {
         #expect(!model.showManualEntry)
     }
 
-    @Test func `configured gateway result is accepted only for the visible selected route`() {
-        #expect(OnboardingView.shouldOpenConfiguredGatewayDashboard(
-            onboardingVisible: true,
-            expectedMode: .remote,
-            currentMode: .remote,
-            systemAgentResumePending: false,
-            setupOwnsInferenceTransition: false))
-        #expect(!OnboardingView.shouldOpenConfiguredGatewayDashboard(
-            onboardingVisible: false,
-            expectedMode: .remote,
-            currentMode: .remote,
-            systemAgentResumePending: false,
-            setupOwnsInferenceTransition: false))
-        #expect(!OnboardingView.shouldOpenConfiguredGatewayDashboard(
-            onboardingVisible: true,
-            expectedMode: .remote,
-            currentMode: .local,
-            systemAgentResumePending: false,
-            setupOwnsInferenceTransition: false))
-        #expect(!OnboardingView.shouldOpenConfiguredGatewayDashboard(
-            onboardingVisible: true,
-            expectedMode: .unconfigured,
-            currentMode: .unconfigured,
-            systemAgentResumePending: false,
-            setupOwnsInferenceTransition: false))
-    }
-
-    @Test func `fresh inference transition owns the OpenClaw handoff`() {
-        #expect(!OnboardingView.shouldOpenConfiguredGatewayDashboard(
-            onboardingVisible: true,
-            expectedMode: .local,
-            currentMode: .local,
-            systemAgentResumePending: false,
-            setupOwnsInferenceTransition: true))
-    }
-
-    @Test func `pending OpenClaw handoff cannot be mistaken for an existing install`() {
-        #expect(!OnboardingView.shouldOpenConfiguredGatewayDashboard(
-            onboardingVisible: true,
-            expectedMode: .local,
-            currentMode: .local,
-            systemAgentResumePending: true,
-            setupOwnsInferenceTransition: false))
-    }
-
     @Test func `configured model label stays pending until live verification`() async throws {
         // Isolated defaults + fixed route: the default init reads the machine's
         // real resume store, whose leftover activation leases fail this test on
@@ -1491,6 +1481,63 @@ struct OnboardingAISetupTests {
         #expect(model.connected)
         #expect(!model.pendingActivationVerification)
         #expect(model.selectedKind == "existing-model")
+    }
+
+    @Test func `implicit model label falls through verification to automatic setup`() async throws {
+        let defaults = try #require(isolatedAISetupDefaults(prefix: "OnboardingImplicitModelTests"))
+        let recorder = AISetupRequestRecorder()
+        let session = makeAISetupRequestSession(recorder: recorder) { task, request in
+            let response: Data? = switch request.method {
+            case "agents.list": configuredModelResponse(id: request.id)
+            case "openclaw.setup.verify": unconfiguredSetupVerificationResponse(id: request.id)
+            case "openclaw.setup.detect": actionableDetectedSetupResponse(id: request.id)
+            case "openclaw.setup.activate": successfulActivationResponse(
+                    id: request.id,
+                    modelRef: "claude-cli/claude-opus-4-8",
+                    latencyMs: 42)
+            default: nil
+            }
+            if let response {
+                task.emitReceiveSuccess(.data(response))
+            }
+        }
+        let url = try #require(URL(string: "ws://localhost:18789"))
+        let gateway = makeAISetupGateway(url: url, session: session)
+        let appState = AppState(preview: true)
+        appState.connectionMode = .local
+        var handoffs: [OnboardingDashboardHandoff] = []
+        let view = OnboardingView(
+            state: appState,
+            aiSetupGateway: gateway,
+            systemAgentDefaults: defaults,
+            aiSetupRouteIdentityProvider: { "local" },
+            dashboardHandoffOpener: { handoffs.append($0) })
+        view.onboardingVisible = true
+        view.currentPage = try #require(view.pageOrder.firstIndex(of: view.aiPageIndex))
+
+        let probe = try #require(view.probeConfiguredGatewayForDashboard(
+            startAISetupWhenMissing: true,
+            knownVisible: true,
+            knownAISetupPage: true))
+        await probe.value
+        for _ in 0..<200 {
+            if view.aiSetup.connected {
+                break
+            }
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
+
+        #expect(view.aiSetup.connected)
+        #expect(view.aiSetup.selectedKind == "claude-cli")
+        #expect(view.finishState.didFinish)
+        // Fresh activation hands off to the custodian first-run flow.
+        #expect(handoffs == [.custodianOnboarding])
+        #expect(await (recorder.snapshot()).methods == [
+            "agents.list",
+            "openclaw.setup.verify",
+            "openclaw.setup.detect",
+            "openclaw.setup.activate",
+        ])
     }
 
     @Test func `pending handoff connects only after route-bound live verification`() async throws {
@@ -2869,6 +2916,223 @@ struct OnboardingAISetupTests {
 
         #expect(await observation.value())
         #expect(!isPending(defaults))
+    }
+
+    @Test func `different candidate supersedes busy activation and ignores its late result`() async throws {
+        let defaults = try #require(isolatedAISetupDefaults(prefix: "OnboardingCandidateSupersedeTests"))
+        let firstActivation = AISetupRequestGate()
+        let claudeAttempts = AISetupSocketGeneration()
+        let url = try #require(URL(string: "ws://example.invalid"))
+        let harness = AISetupHarness(url: url) { _, request, _ in
+            switch request.method {
+            case "openclaw.setup.detect":
+                return selectableCandidatesDetectedSetupResponse(id: request.id)
+            case "openclaw.setup.activate":
+                switch request.params["kind"] as? String {
+                case "codex-cli":
+                    await firstActivation.wait()
+                    return successfulActivationResponse(
+                        id: request.id,
+                        modelRef: "openai/gpt-5.5",
+                        latencyMs: 900)
+                case "claude-cli" where claudeAttempts.claim() == 0:
+                    return setupAdmissionBusyResponse(id: request.id)
+                case "claude-cli":
+                    return successfulActivationResponse(
+                        id: request.id,
+                        modelRef: "claude-cli/claude-opus-4-8",
+                        latencyMs: 120)
+                default:
+                    return failedActivationResponse(id: request.id)
+                }
+            default:
+                return nil
+            }
+        }
+        let model = harness.model(defaults: defaults)
+        var handoffCount = 0
+        model.onConnected = { handoffCount += 1 }
+
+        let automatic = Task { await model.detectAndAutoConnect() }
+        await firstActivation.waitUntilStarted()
+        model.userSelect(kind: "claude-cli")
+
+        #expect(model.selectedKind == "claude-cli")
+        #expect(model.statuses["codex-cli"] == .untried)
+        #expect(model.statuses["claude-cli"] == .testing)
+        _ = await waitForAISetupRequests(harness.recorder, count: 3)
+        await firstActivation.release()
+        await automatic.value
+        for _ in 0..<400 where !model.connected {
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
+
+        #expect(model.connected)
+        #expect(model.selectedKind == "claude-cli")
+        #expect(handoffCount == 1)
+        #expect(await (harness.recorder.snapshot()).methods == [
+            "openclaw.setup.detect",
+            "openclaw.setup.activate",
+            "openclaw.setup.activate",
+            "openclaw.setup.activate",
+        ])
+    }
+
+    @Test func `same candidate click during testing is a no-op`() async throws {
+        let defaults = try #require(isolatedAISetupDefaults(prefix: "OnboardingSameCandidateClickTests"))
+        let activation = AISetupRequestGate()
+        let url = try #require(URL(string: "ws://example.invalid"))
+        let harness = AISetupHarness(url: url) { _, request, _ in
+            switch request.method {
+            case "openclaw.setup.detect":
+                return selectableCandidatesDetectedSetupResponse(id: request.id)
+            case "openclaw.setup.activate":
+                await activation.wait()
+                return successfulActivationResponse(
+                    id: request.id,
+                    modelRef: "openai/gpt-5.5",
+                    latencyMs: 900)
+            default:
+                return nil
+            }
+        }
+        let model = harness.model(defaults: defaults)
+
+        let automatic = Task { await model.detectAndAutoConnect() }
+        await activation.waitUntilStarted()
+        let owner = try #require(storedActivationOwner(defaults))
+        model.userSelect(kind: "codex-cli")
+        await settleQueuedAISetupTasks()
+
+        #expect(model.selectedKind == "codex-cli")
+        #expect(model.statuses["codex-cli"] == .testing)
+        #expect(storedActivationOwner(defaults) == owner)
+        #expect(await (harness.recorder.snapshot()).methods == [
+            "openclaw.setup.detect",
+            "openclaw.setup.activate",
+        ])
+        await activation.release()
+        await automatic.value
+    }
+
+    @Test func `user pick after exhausted auto candidates clears the stale verdict`() async throws {
+        let defaults = try #require(isolatedAISetupDefaults(prefix: "OnboardingExhaustedRetryTests"))
+        let attempts = AISetupSocketGeneration()
+        let url = try #require(URL(string: "ws://example.invalid"))
+        let harness = AISetupHarness(url: url) { _, request, _ in
+            switch request.method {
+            case "openclaw.setup.detect":
+                return selectableCandidatesDetectedSetupResponse(id: request.id)
+            case "openclaw.setup.activate" where attempts.claim() < 2:
+                return failedActivationResponse(id: request.id)
+            case "openclaw.setup.activate":
+                return successfulActivationResponse(
+                    id: request.id,
+                    modelRef: "openai/gpt-5.5",
+                    latencyMs: 120)
+            default:
+                return nil
+            }
+        }
+        let model = harness.model(defaults: defaults)
+
+        await model.detectAndAutoConnect()
+        #expect(model.exhaustedAutoCandidates)
+        #expect(!model.connected)
+
+        model.userSelect(kind: "codex-cli")
+        // The retest owns the verdict from the moment it starts; the stale
+        // "none of the found options worked" card must not outlive the pick.
+        #expect(!model.exhaustedAutoCandidates)
+        for _ in 0..<400 where !model.connected {
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
+        #expect(model.connected)
+        #expect(model.selectedKind == "codex-cli")
+    }
+
+    @Test func `candidate click after connection is ignored`() async throws {
+        let defaults = try #require(isolatedAISetupDefaults(prefix: "OnboardingConnectedCandidateClickTests"))
+        let url = try #require(URL(string: "ws://example.invalid"))
+        let harness = AISetupHarness(url: url) { _, request, _ in
+            switch request.method {
+            case "openclaw.setup.detect":
+                selectableCandidatesDetectedSetupResponse(id: request.id)
+            case "openclaw.setup.activate":
+                successfulActivationResponse(
+                    id: request.id,
+                    modelRef: "openai/gpt-5.5",
+                    latencyMs: 120)
+            default:
+                nil
+            }
+        }
+        let model = harness.model(defaults: defaults)
+
+        await model.detectAndAutoConnect()
+        model.userSelect(kind: "claude-cli")
+        await settleQueuedAISetupTasks()
+
+        #expect(model.connected)
+        #expect(model.selectedKind == "codex-cli")
+        #expect(await (harness.recorder.snapshot()).methods == [
+            "openclaw.setup.detect",
+            "openclaw.setup.activate",
+        ])
+    }
+
+    @Test func `superseding candidate replaces and clears the pending activation owner`() async throws {
+        let defaults = try #require(isolatedAISetupDefaults(prefix: "OnboardingCandidateLeaseReplacementTests"))
+        let firstActivation = AISetupRequestGate()
+        let secondActivation = AISetupRequestGate()
+        let url = try #require(URL(string: "ws://example.invalid"))
+        let harness = AISetupHarness(url: url) { _, request, _ in
+            switch request.method {
+            case "openclaw.setup.detect":
+                return selectableCandidatesDetectedSetupResponse(id: request.id)
+            case "openclaw.setup.activate" where request.params["kind"] as? String == "codex-cli":
+                await firstActivation.wait()
+                return successfulActivationResponse(
+                    id: request.id,
+                    modelRef: "openai/gpt-5.5",
+                    latencyMs: 900)
+            case "openclaw.setup.activate":
+                await secondActivation.wait()
+                return failedActivationResponse(id: request.id)
+            default:
+                return nil
+            }
+        }
+        let model = harness.model(defaults: defaults)
+
+        let automatic = Task { await model.detectAndAutoConnect() }
+        await firstActivation.waitUntilStarted()
+        let supersededOwner = try #require(storedActivationOwner(defaults))
+        guard case let .activating(supersededDeadline) = pendingState(defaults) else {
+            Issue.record("expected the first candidate to own an activation lease")
+            return
+        }
+        model.userSelect(kind: "claude-cli")
+        await secondActivation.waitUntilStarted()
+        let replacementOwner = try #require(storedActivationOwner(defaults))
+        guard case let .activating(replacementDeadline) = pendingState(defaults) else {
+            Issue.record("expected the selected candidate to replace the activation lease")
+            return
+        }
+
+        #expect(replacementOwner != supersededOwner)
+        #expect(replacementDeadline >= supersededDeadline)
+        #expect(!isOwned(by: supersededOwner, defaults: defaults))
+        #expect(isOwned(by: replacementOwner, defaults: defaults))
+        await firstActivation.release()
+        await secondActivation.release()
+        await automatic.value
+        for _ in 0..<200 where isPending(defaults) {
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
+
+        #expect(pendingState(defaults) == .none)
+        #expect(!model.connected)
     }
 
     @Test func `stale queued detection cannot probe a replacement Gateway`() async throws {

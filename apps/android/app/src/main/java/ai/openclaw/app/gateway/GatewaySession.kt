@@ -1980,11 +1980,8 @@ class GatewaySession(
         ?: endpoint.host.trim()
     if (fallbackHost.isEmpty()) return trimmed.ifBlank { null }
 
-    // For TLS connections, use the connected endpoint's scheme/port instead of raw canvas metadata.
     val fallbackScheme = if (isTlsConnection) "https" else scheme
-    // For TLS, always use the connected endpoint port.
-    val fallbackPort = if (isTlsConnection) endpoint.port else (endpoint.canvasPort ?: endpoint.port)
-    return buildCanvasUrl(host = fallbackHost, scheme = fallbackScheme, port = fallbackPort, suffix = suffix)
+    return buildCanvasUrl(host = fallbackHost, scheme = fallbackScheme, port = endpoint.port, suffix = suffix)
   }
 
   private fun buildCanvasUrl(
@@ -2175,9 +2172,11 @@ internal fun buildGatewayWebSocketUrl(
   host: String,
   port: Int,
   useTls: Boolean,
+  contextPath: String = "",
 ): String {
   val scheme = if (useTls) "wss" else "ws"
-  return "$scheme://${formatGatewayAuthority(host, port)}"
+  val path = normalizeGatewayContextPath(contextPath)
+  return "$scheme://${formatGatewayAuthority(host, port)}$path"
 }
 
 /** Builds one gateway upgrade request without exposing proxy credentials to cleartext routes. */
@@ -2186,7 +2185,15 @@ internal fun buildGatewayWebSocketUpgradeRequest(
   tls: GatewayTlsParams?,
   customHeadersProvider: ((stableId: String) -> Map<String, String>)?,
 ): Request {
-  val request = Request.Builder().url(buildGatewayWebSocketUrl(endpoint.host, endpoint.port, tls != null))
+  val request =
+    Request.Builder().url(
+      buildGatewayWebSocketUrl(
+        endpoint.host,
+        endpoint.port,
+        tls != null,
+        endpoint.contextPath,
+      ),
+    )
   if (tls == null) return request.build()
 
   // Read at connect time so edits apply on the next reconnect. Headers may contain service tokens

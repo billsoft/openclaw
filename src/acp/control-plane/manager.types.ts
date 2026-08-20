@@ -1,5 +1,6 @@
 /** Shared types and dependency wiring for the ACP session manager control plane. */
 import type {
+  AcpElicitationHandler,
   AcpRuntime,
   AcpRuntimeCapabilities,
   AcpRuntimeEvent,
@@ -59,6 +60,8 @@ export type AcpTurnAttachment = AcpRuntimeTurnAttachment;
 
 /** Input for one ACP prompt turn routed through the manager. */
 export type AcpRunTurnInput = {
+  /** Private admitted execution context supplied by the owning host ingress. */
+  admittedRunContext: import("../../agents/admitted-run-context.js").AdmittedRunContext;
   cfg: OpenClawConfig;
   sessionKey: string;
   provenance: "human" | "agent" | "system";
@@ -67,6 +70,7 @@ export type AcpRunTurnInput = {
   mode: AcpRuntimePromptMode;
   requestId: string;
   signal?: AbortSignal;
+  onElicitation?: AcpElicitationHandler;
   onLifecycle?: (event: AcpTurnLifecycleEvent) => Promise<void> | void;
   onEvent?: (event: AcpRuntimeEvent) => Promise<void> | void;
 };

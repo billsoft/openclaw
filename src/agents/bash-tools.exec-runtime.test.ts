@@ -193,8 +193,9 @@ describe("runExecProcess cursor tracking", () => {
 describe("sandbox exec preparation failures", () => {
   it("settles the registered session once when buildExecSpec rejects", async () => {
     const registry = await import("./bash-process-registry.js");
+    const sessionSlugs = await import("./session-slug.js");
     const sessionId = "sandbox-preparation-failure";
-    const sessionSlug = vi.spyOn(registry, "createSessionSlug").mockReturnValue(sessionId);
+    const sessionSlug = vi.spyOn(sessionSlugs, "createSessionSlug").mockReturnValue(sessionId);
     const preparation =
       createDeferred<Awaited<ReturnType<NonNullable<BashSandboxConfig["buildExecSpec"]>>>>();
     const finalizeExec = vi.fn<NonNullable<BashSandboxConfig["finalizeExec"]>>(async () => {});
@@ -492,9 +493,9 @@ describe("runExecProcess PTY fallback", () => {
     return call[0];
   }
 
-  it("falls back when PTY spawn fails", async () => {
+  it("visibly falls back when the portable worker rejects PTY", async () => {
     supervisorMock.spawn
-      .mockRejectedValueOnce(new Error("pty spawn failed"))
+      .mockRejectedValueOnce(new Error("PTY is unavailable in the portable worker runtime"))
       .mockImplementationOnce(async (input: SpawnInput) => runtimeManagedRun(input, "ok"));
 
     const warnings: string[] = [];
@@ -503,7 +504,7 @@ describe("runExecProcess PTY fallback", () => {
 
     expect(outcome.status).toBe("completed");
     expect(outcome.aggregated).toContain("ok");
-    expect(warnings.join("\n")).toContain("PTY spawn failed");
+    expect(warnings.join("\n")).toContain("PTY is unavailable in the portable worker runtime");
     expect(spawnInput(0).mode).toBe("pty");
     expect(spawnInput(1).mode).toBe("child");
   });

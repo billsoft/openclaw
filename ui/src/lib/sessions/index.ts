@@ -49,8 +49,10 @@ export {
   filterSessionRows,
   filterVisibleSessionRows,
   getVisibleSessionRows,
+  isSystemCreatedSessionRow,
   resolveSessionNavigation,
   sessionMatchesArchivedFilter,
+  sessionMatchesVisibleSessionScope,
   scopedAgentIdForSession,
   scopedAgentListParamsForRefreshTarget,
   scopedAgentListParamsForSession,
@@ -91,12 +93,13 @@ export function createSessionCapability(gateway: SessionGateway): SessionCapabil
     error: null,
     deletedSessions: [],
     groups: [],
+    groupSettings: [],
     sectionOrder: [],
   };
   const connection = createGatewayConnectionLifecycle(gateway.snapshot);
   const swarmActivity = new SwarmActivityTracker();
   const pullRequestSummaries = new Map<string, SessionCatalogPullRequestSummary>();
-  const pullRequestEpochs = new Map<string, symbol>();
+  const pullRequestEpochs = new Map<string, object>();
   const listeners = new Set<(next: SessionState) => void>();
   const createdListeners = new Set<(key: string) => void>();
   let canonicalListRevision = 0;
@@ -127,7 +130,7 @@ export function createSessionCapability(gateway: SessionGateway): SessionCapabil
   // UI-owned facts the capability keeps beside them, so every published result
   // passes through the same overlay: swarm notes, then in-flight pin intents.
   const decorateRows = (result: SessionsListResult | null): SessionsListResult | null =>
-    mutations.applyPendingPins(swarmActivity.decorate(result));
+    mutations.applyConfirmedArchives(mutations.applyPendingPins(swarmActivity.decorate(result)));
 
   const roster = createSessionRosterRefresh({
     connection,
@@ -196,28 +199,23 @@ export function createSessionCapability(gateway: SessionGateway): SessionCapabil
 
   const pullRequestSummary = (key: string) => pullRequestSummaries.get(key.trim());
 
-  const capturePullRequestEpoch = (key: string): symbol => {
-    const normalizedKey = key.trim();
-    const epoch = Symbol(normalizedKey);
-    pullRequestEpochs.set(normalizedKey, epoch);
+  const capturePullRequestEpoch = (key: string): object => {
+    const epoch = {};
+    pullRequestEpochs.set(key.trim(), epoch);
     return epoch;
   };
 
   const setPullRequestSummary = (
     key: string,
     summary: SessionCatalogPullRequestSummary | undefined,
-    epoch?: symbol,
+    epoch?: object,
   ) => {
     const normalizedKey = key.trim();
     if (!normalizedKey || (epoch !== undefined && pullRequestEpochs.get(normalizedKey) !== epoch)) {
       return;
     }
     const previous = pullRequestSummaries.get(normalizedKey);
-    const unchanged =
-      previous?.state === summary?.state &&
-      previous?.numbers.length === summary?.numbers.length &&
-      previous?.numbers.every((number, index) => number === summary?.numbers[index]);
-    if (unchanged || (!previous && !summary)) {
+    if (previous === summary) {
       return;
     }
     if (summary) {
@@ -256,11 +254,41 @@ export function createSessionCapability(gateway: SessionGateway): SessionCapabil
     );
   };
 
+  const reconcileChangedEvent = (payload: unknown, options?: SessionReconcileOptions) => {
+    const previous = state.result;
+    const eventInfo = readSessionChangedEvent(payload);
+    const selectedSessionKey = gateway.snapshot.sessionKey?.trim();
+    const archivesSelectedSession =
+      eventInfo?.archived === true &&
+      Boolean(
+        selectedSessionKey &&
+        uiSessionEventMatches(
+          {
+            assistantAgentId: gateway.snapshot.assistantAgentId,
+            hello: gateway.snapshot.hello,
+            sessionKey: selectedSessionKey,
+          },
+          eventInfo.key,
+          eventInfo.agentId,
+        ),
+      );
+    // The capability owns the shared roster, so every event consumer must
+    // preserve the routed archive regardless of subscriber delivery order.
+    const reconcileOptions = archivesSelectedSession
+      ? { ...options, archivedFilter: "all" as const }
+      : options;
+    const reconciled = reconcileSessionChanged(previous, payload, reconcileOptions);
+    if (reconciled.result !== previous && reconciled.key && eventInfo) {
+      mutations.observeArchiveState(reconciled.key, eventInfo.archived, reconciled.row);
+    }
+    return { eventInfo, reconciled };
+  };
+
   const reconcileChanged = (
     payload: unknown,
     options?: SessionReconcileOptions,
   ): SessionChangedResult => {
-    const base = reconcileSessionChanged(state.result, payload, options);
+    const { reconciled: base } = reconcileChangedEvent(payload, options);
     const result = decorateRows(base.result);
     const reconciled =
       result === base.result
@@ -281,7 +309,13 @@ export function createSessionCapability(gateway: SessionGateway): SessionCapabil
           ? normalizeAgentId(options.resultAgentId)
           : state.agentId,
         deletedSessions: reconciled.deletedKey
-          ? [{ key: reconciled.deletedKey, agentId: reconciled.agentId ?? undefined }]
+          ? [
+              {
+                key: reconciled.deletedKey,
+                ...(reconciled.agentId ? { agentId: reconciled.agentId } : {}),
+                retireBeforeRevision: Date.now(),
+              },
+            ]
           : [],
       });
     }
@@ -328,6 +362,7 @@ export function createSessionCapability(gateway: SessionGateway): SessionCapabil
         error: null,
         deletedSessions: [],
         groups: state.groups,
+        groupSettings: state.groupSettings,
         sectionOrder: state.sectionOrder,
       });
       return;
@@ -352,6 +387,9 @@ export function createSessionCapability(gateway: SessionGateway): SessionCapabil
             backgroundHydrate: true,
             force: true,
           });
+          if (connection.isCurrent(scope)) {
+            await roster.refreshManagedLists();
+          }
         }
       })();
     }
@@ -366,11 +404,16 @@ export function createSessionCapability(gateway: SessionGateway): SessionCapabil
     if (decoratedResult !== state.result) {
       publish({ ...state, result: decoratedResult });
     }
-    const reconciled = reconcileSessionChanged(state.result, event.payload, {
+    const { eventInfo, reconciled } = reconcileChangedEvent(event.payload, {
       resultAgentId: state.agentId,
       archivedFilter: roster.lastOptions().archivedFilter,
     });
-    const eventInfo = readSessionChangedEvent(event.payload);
+    if (eventInfo?.archived !== null) {
+      const result = decorateRows(reconciled.result);
+      if (result !== state.result) {
+        publishReconciledState({ ...state, result });
+      }
+    }
     const eventReason = (event.payload as { reason?: unknown } | null)?.reason;
     const payloadAgentId = (event.payload as { agentId?: unknown } | null)?.agentId;
     if (eventReason === "groups") {
@@ -388,7 +431,13 @@ export function createSessionCapability(gateway: SessionGateway): SessionCapabil
       retirePullRequestSummary(reconciled.deletedKey);
       publish({
         ...state,
-        deletedSessions: [{ key: reconciled.deletedKey, agentId: reconciled.agentId ?? undefined }],
+        deletedSessions: [
+          {
+            key: reconciled.deletedKey,
+            ...(reconciled.agentId ? { agentId: reconciled.agentId } : {}),
+            retireBeforeRevision: Date.now(),
+          },
+        ],
       });
     } else if ((eventReason === "create" || eventReason === "new") && eventInfo) {
       const remainingDeletedSessions = state.deletedSessions.filter(
@@ -407,13 +456,12 @@ export function createSessionCapability(gateway: SessionGateway): SessionCapabil
         publish({ ...state, deletedSessions: remainingDeletedSessions });
       }
     }
-    // Gateway lists own filtering/order; events coalesce into one canonical refresh.
+    // Gateway lists own filtering/order; authoritative events invalidate every matching roster.
     roster.scheduleEvent({
       agentId:
         eventInfo?.agentId ??
         parseAgentSessionKey(eventInfo?.key)?.agentId ??
         (typeof payloadAgentId === "string" ? payloadAgentId : undefined),
-      filtered: event.event === "sessions.changed",
     });
   });
 
@@ -424,10 +472,12 @@ export function createSessionCapability(gateway: SessionGateway): SessionCapabil
     get canonicalListRevision() {
       return canonicalListRevision;
     },
+    captureConnectionScope: () => connection.capture(),
+    isConnectionScopeCurrent: (scope) => connection.isCurrent(scope),
     list: roster.list,
     listSnapshot: (scope) => roster.listSnapshot(scope),
     subscribeList(scope, listener) {
-      if (scope.archivedFilter && scope.archivedFilter !== "active") {
+      if (!roster.isPrimaryList(scope)) {
         return roster.subscribeList(scope, listener);
       }
       const notify = () => listener(roster.listSnapshot(scope));
@@ -435,7 +485,8 @@ export function createSessionCapability(gateway: SessionGateway): SessionCapabil
       return () => listeners.delete(notify);
     },
     refreshList: (options) => roster.refreshList(options),
-    setCreatorFilter: (creatorId) => roster.setCreatorFilter(creatorId),
+    setOwnerFilter: (ownerId) => roster.setOwnerFilter(ownerId),
+    setInvolvingMeFilter: (enabled) => roster.setInvolvingMeFilter(enabled),
     reconcile,
     reconcileChanged,
     reconcileRunTerminal,
@@ -443,7 +494,9 @@ export function createSessionCapability(gateway: SessionGateway): SessionCapabil
     refreshReplacement: roster.refreshReplacement,
     createResult: mutations.createResult,
     create: mutations.create,
+    recover: mutations.recover,
     patch: mutations.patch,
+    assignOwner: mutations.assignOwner,
     retireModelOverride: mutations.retireModelOverride,
     setModelOverride: mutations.setModelOverride,
     patchRowLocal: mutations.patchRowLocal,
@@ -455,7 +508,6 @@ export function createSessionCapability(gateway: SessionGateway): SessionCapabil
     deleteMany: mutations.deleteMany,
     reset: mutations.reset,
     compact: operations.compact,
-    steer: operations.steer,
     listFiles: operations.listFiles,
     getFile: operations.getFile,
     setFile: operations.setFile,
@@ -469,8 +521,12 @@ export function createSessionCapability(gateway: SessionGateway): SessionCapabil
     listBranches: operations.listBranches,
     switchBranch: operations.switchBranch,
     groupsLoad: groups.load,
+    groupsGeneration: groups.generation,
+    groupsStatus: groups.status,
+    groupsInvalidate: groups.invalidate,
     groupsPut: groups.put,
     groupsRename: groups.rename,
+    groupsUpdate: groups.update,
     groupsDelete: groups.delete,
     subscribeCreated(listener) {
       createdListeners.add(listener);

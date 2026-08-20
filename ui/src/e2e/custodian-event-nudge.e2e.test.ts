@@ -376,7 +376,7 @@ suite.define(() => {
         const optionRestingStyle = await twitchOption.evaluate(readInteractionStyle);
         await twitchOption.hover();
         const optionHoverStyle = await twitchOption.evaluate(readInteractionStyle);
-        expect(optionRestingStyle.cursor).toBe("pointer");
+        expect(optionRestingStyle.cursor).toBe("default");
         expect(optionHoverStyle.borderColor).not.toBe(optionRestingStyle.borderColor);
 
         const disabledContinueStyle = await continueButton.evaluate(readInteractionStyle);
@@ -384,7 +384,7 @@ suite.define(() => {
         expect(await continueButton.evaluate(readInteractionStyle)).toEqual(disabledContinueStyle);
         expect(disabledContinueStyle.cursor).toBe("not-allowed");
         expect(await cancelButton.evaluate((element) => getComputedStyle(element).cursor)).toBe(
-          "pointer",
+          "default",
         );
         expect(
           await Promise.all(
@@ -400,10 +400,20 @@ suite.define(() => {
         ]) {
           await page.setViewportSize(viewport);
           await settleUi(page);
-          const [continueBox, cancelBox] = await Promise.all([
-            continueButton.boundingBox(),
-            cancelButton.boundingBox(),
-          ]);
+          // Read both boxes in one browser frame so scroll anchoring during a
+          // viewport change cannot make two individually sampled boxes disagree.
+          const [cancelBox, continueBox] = await page
+            .locator(".wizard-step__actions--split")
+            .evaluate((actions) =>
+              [".custodian__wizard-cancel", ".btn.primary"].map((selector) => {
+                const element = actions.querySelector(selector);
+                if (!(element instanceof HTMLElement)) {
+                  return null;
+                }
+                const { height, width, x, y } = element.getBoundingClientRect();
+                return { height, width, x, y };
+              }),
+            );
           expect(cancelBox).not.toBeNull();
           expect(continueBox).not.toBeNull();
           expect(cancelBox!.x).toBeLessThan(continueBox!.x);
@@ -443,7 +453,7 @@ suite.define(() => {
         });
         await page.getByLabel("Twitch").check();
         expect(await continueButton.evaluate((element) => getComputedStyle(element).cursor)).toBe(
-          "pointer",
+          "default",
         );
         await page.getByRole("button", { name: "Continue" }).click();
         await page.getByLabel("Announcements").waitFor();

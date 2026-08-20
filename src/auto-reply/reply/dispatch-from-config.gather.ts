@@ -64,7 +64,11 @@ export async function gatherDispatchRequest(
   const ctx = isFinalizedInboundContext(params.ctx)
     ? params.ctx
     : finalizeInboundContext(params.ctx);
-  const normalizedParams = ctx === params.ctx ? params : { ...params, ctx };
+  const normalizedParams: DispatchFromConfigParams = {
+    ...params,
+    ctx,
+    replyOptions: { ...params.replyOptions },
+  };
   const state = {
     params: normalizedParams,
     messageAuditTerminal,
@@ -346,15 +350,17 @@ export async function gatherDispatchRequest(
     initialDispatchReplyOperation,
     messageAuditTerminal,
     operationSessionStoreEntry,
-    replyOptions: params.replyOptions,
+    replyOptions: normalizedParams.replyOptions,
     resolveOperationExpectedSessionId,
     routeThreadId,
+    sessionWorkerPlacementContext: normalizedParams.sessionWorkerPlacementContext,
   });
   const {
     completeDispatchReplyOperation,
     dispatchHookDispatcher,
     ensureDispatchReplyOperation,
     failDispatchReplyOperation,
+    getAgentRunTerminalOutcome,
     getDispatchAbortOperation,
     getDispatchAbortSignal,
     getDispatchReplyOperation,
@@ -493,6 +499,7 @@ export async function gatherDispatchRequest(
     dispatchHookDispatcher,
     ensureDispatchReplyOperation,
     failDispatchReplyOperation,
+    getAgentRunTerminalOutcome,
     getDispatchAbortOperation,
     getDispatchAbortSignal,
     getDispatchReplyOperation,

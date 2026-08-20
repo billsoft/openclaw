@@ -33,6 +33,10 @@ import {
 import { prepareEmbeddedAttemptSessionRuntime } from "./attempt-session-runtime-prepare.js";
 import { cleanupEmbeddedAttemptSessionPhase } from "./attempt-session-settle.js";
 import {
+  queueSessionsYieldInterruptMessage,
+  SESSIONS_YIELD_ABORT_REASON,
+} from "./attempt-sessions-yield.js";
+import {
   prepareEmbeddedAttemptSetup,
   prepareEmbeddedAttemptSkills,
   startEmbeddedAttemptDiagnostics,
@@ -43,10 +47,6 @@ import { prepareEmbeddedAttemptSystemPrompt } from "./attempt-system-prompt-prep
 import { prepareEmbeddedAttemptToolCatalog } from "./attempt-tool-catalog.js";
 import { prepareEmbeddedAttemptToolBase } from "./attempt-tool-prepare.js";
 import { prepareEmbeddedAttemptTranscriptLifecycle } from "./attempt-transcript-lifecycle-prepare.js";
-import {
-  queueSessionsYieldInterruptMessage,
-  SESSIONS_YIELD_ABORT_REASON,
-} from "./attempt.sessions-yield.js";
 import {
   measureEmbeddedAgentPreparation,
   measureEmbeddedAgentPreparationSync,
@@ -74,6 +74,7 @@ export async function runEmbeddedAttempt(
     resolvedWorkspace,
     sandbox,
     sandboxSessionKey,
+    sessionPermissionPolicy,
     sessionAgentId,
   } = await measureEmbeddedAgentPreparation(
     "attempt.setup",
@@ -85,7 +86,6 @@ export async function runEmbeddedAttempt(
 
   let restoreSkillEnv: (() => void) | undefined;
   const executionState: EmbeddedAttemptExecutionState = {
-    beforeAgentRunBlocked: false,
     beforeAgentRunBlockedBy: undefined,
     terminal: params.abortSignal?.aborted
       ? { kind: "aborted", source: "external" }
@@ -100,6 +100,7 @@ export async function runEmbeddedAttempt(
   let bundleLspRuntime: Awaited<ReturnType<typeof createBundleLspToolRuntime>> | undefined;
   let toolSearchCatalogRef: ToolSearchCatalogRef | undefined;
   let toolSearchCatalogApplied = false;
+  let runCleanups: Array<(reason: string) => Promise<void>> = [];
   const cleanupEmbeddedPrepResourcesAfterEarlyExit = async () => {
     if (toolSearchCatalogApplied) {
       clearToolSearchCatalog({
@@ -198,9 +199,10 @@ export async function runEmbeddedAttempt(
           effectiveCwd,
           effectiveWorkspace,
           markCoreToolStage: (name) => corePluginToolStages.mark(name),
-          onYield: (message) => {
+          onYield: (message, acknowledgment) => {
             yieldDetected = true;
             yieldMessage = message;
+            yieldAcknowledgment = acknowledgment;
             queueYieldInterruptForSession?.();
             runAbortController.abort(SESSIONS_YIELD_ABORT_REASON);
             abortSessionForYield?.();
@@ -210,6 +212,7 @@ export async function runEmbeddedAttempt(
           runTrace,
           sandbox,
           sandboxSessionKey,
+          sessionPermissionPolicy,
           sessionAgentId,
           skillUsagePaths,
           skillsSnapshot: skillsSnapshotForRun,
@@ -229,11 +232,13 @@ export async function runEmbeddedAttempt(
       computerContextEpoch,
       localModelLeanEnabled,
       replaySafetyOptions,
+      runCleanups: preparedRunCleanups,
       toolSearchControlsEnabledForRun,
       toolSearchRuntimeConfig,
       toolsEnabled,
       toolsRaw,
     } = preparedToolBase;
+    runCleanups = preparedRunCleanups;
     prepStages.mark("core-plugin-tools");
     emitCorePluginToolStageSummary("core-plugin-tools", corePluginToolStages.snapshot());
     const preparedBootstrap = await measureEmbeddedAgentPreparation(
@@ -241,6 +246,7 @@ export async function runEmbeddedAttempt(
       () =>
         prepareEmbeddedAttemptBootstrap({
           attempt: params,
+          bootstrapWorkspaceDir: params.bootstrapWorkspaceDir,
           effectiveWorkspace,
           hasReadTool: toolsEnabled && toolsRaw.some((tool) => tool.name === "read"),
           isRawModelRun,
@@ -254,6 +260,7 @@ export async function runEmbeddedAttempt(
     // Track sessions_yield tool invocation (callback pattern, like clientToolCallDetected)
     let yieldDetected = false;
     let yieldMessage: string | null = null;
+    let yieldAcknowledgment: string | undefined;
     // Late-binding reference so onYield can abort the session (declared after tool creation)
     let abortSessionForYield: (() => void) | null = null;
     let queueYieldInterruptForSession: (() => void) | null = null;
@@ -481,7 +488,12 @@ export async function runEmbeddedAttempt(
         diagnostics: { diagnosticTrace, runTrace },
         state: executionState,
         lifecycle: {
-          readYieldState: () => ({ yieldAbortSettled, yieldDetected, yieldMessage }),
+          readYieldState: () => ({
+            yieldAbortSettled,
+            yieldDetected,
+            yieldMessage,
+            yieldAcknowledgment,
+          }),
           setToolSearchCatalogExecutor: (executor) => {
             toolSearchCatalogExecutor = executor;
           },
@@ -523,7 +535,6 @@ export async function runEmbeddedAttempt(
         emitDiagnosticRunCompleted,
         readState: () => ({
           ...projectAgentRunAttemptTerminal(executionState.terminal),
-          beforeAgentRunBlocked: executionState.beforeAgentRunBlocked,
           beforeAgentRunBlockedBy: executionState.beforeAgentRunBlockedBy,
         }),
       });
@@ -538,6 +549,19 @@ export async function runEmbeddedAttempt(
     }
     throw error;
   } finally {
+    const cleanupTerminal = projectAgentRunAttemptTerminal(executionState.terminal);
+    const cleanupReason =
+      cleanupTerminal.timedOut ||
+      cleanupTerminal.timedOutDuringCompaction ||
+      cleanupTerminal.timedOutDuringToolExecution
+        ? "timeout"
+        : cleanupTerminal.aborted
+          ? "cancel"
+          : cleanupTerminal.failed
+            ? "error"
+            : "completion";
+    const cleanups = runCleanups.splice(0);
+    await Promise.allSettled(cleanups.map(async (cleanup) => await cleanup(cleanupReason)));
     externalAbortController.dispose();
     clearToolActivityRun(params.runId);
     try {
